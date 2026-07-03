@@ -12,12 +12,14 @@ from repo_parser.parser.queries.common_queries import PROFILES, parse_common
 from repo_parser.parser.queries.docker_queries import parse_dockerfile
 from repo_parser.parser.queries.env_queries import parse_env
 from repo_parser.parser.queries.hcl_queries import parse_hcl
+from repo_parser.parser.queries.java_queries import parse_java
 from repo_parser.parser.queries.javascript_queries import parse_javascript
 from repo_parser.parser.queries.python_queries import parse_python
 from repo_parser.parser.queries.shell_queries import parse_shell
 from repo_parser.parser.queries.sql_queries import parse_sql
 from repo_parser.parser.queries.yaml_queries import parse_yaml
 from repo_parser.parser.registry import detect_language
+from repo_parser.parser.dependencies import infer_internal_dependencies
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,7 @@ PARSERS = {
     "python": lambda fp, src, parser: parse_python(fp, src, parser),
     "javascript": lambda fp, src, parser: parse_javascript(fp, src, parser, "javascript"),
     "typescript": lambda fp, src, parser: parse_javascript(fp, src, parser, "typescript"),
+    "java": lambda fp, src, parser: parse_java(fp, src, parser),
     "dockerfile": lambda fp, src, parser: parse_dockerfile(fp, src, parser),
     "yaml": lambda fp, src, parser: parse_yaml(fp, src, parser),
     "kubernetes": lambda fp, src, parser: parse_yaml(fp, src, parser),
@@ -122,30 +125,12 @@ class ParserEngine:
             )
             return None
 
-    def infer_internal_dependencies(self, parsed_files: list[ParsedFile]) -> None:
-        """Link import statements to internal module paths where possible."""
-        module_paths = {pf.filepath for pf in parsed_files}
-        stem_map: dict[str, str] = {}
-        for path in module_paths:
-            from pathlib import Path
-
-            p = Path(path)
-            stem_map[p.stem] = path
-            if p.suffix:
-                stem_map[p.stem + p.suffix.replace(".", "_")] = path
-
-        for pf in parsed_files:
-            deps: set[str] = set()
-            for imp in pf.imports:
-                for token in imp.replace(",", " ").split():
-                    token = token.strip().strip("'\"")
-                    if token.startswith("."):
-                        resolved = self._resolve_relative(pf.filepath, token)
-                        if resolved and resolved in module_paths:
-                            deps.add(resolved)
-                    elif token in stem_map:
-                        deps.add(stem_map[token])
-            pf.internal_dependencies = sorted(deps)
+    def infer_internal_dependencies(
+        self,
+        parsed_files: list[ParsedFile],
+        sources: dict[str, str] | None = None,
+    ) -> None:
+        infer_internal_dependencies(parsed_files, sources)
 
     @staticmethod
     def _resolve_relative(from_path: str, import_path: str) -> str | None:

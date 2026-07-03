@@ -28,6 +28,13 @@ EXTERNAL_CALL_PATTERNS = [
     (re.compile(r"\bopenai\.\w+\b"), "API (OpenAI SDK)"),
 ]
 
+JS_IMPORT_FROM_RE = re.compile(
+    r"""import\s+(?:type\s+)?(?:[\w*{}\s,$]+\s+from\s+)?['"]([^'"]+)['"]""",
+)
+JS_REQUIRE_RE = re.compile(
+    r"""require\s*\(\s*['"]([^'"]+)['"]\s*\)""",
+)
+
 
 def _extract_leading_comment(root, source: str) -> str | None:
     comments = []
@@ -113,10 +120,27 @@ def parse_javascript(filepath: str, source: str, parser, lang_name: str = "javas
             imp = node_text(source, node).strip()
             if imp:
                 parsed.imports.append(imp)
+        elif kind == "lexical_declaration":
+            # const x = require('...')
+            for child in iter_nodes(node, "call_expression"):
+                if _is_require_call(child, source):
+                    m = JS_REQUIRE_RE.search(node_text(source, child))
+                    if m:
+                        parsed.imports.append(f"require('{m.group(1)}')")
         elif _is_require_call(node, source):
-            imp = node_text(source, node).strip()
-            if imp:
-                parsed.imports.append(imp)
+            m = JS_REQUIRE_RE.search(node_text(source, node))
+            if m:
+                parsed.imports.append(f"require('{m.group(1)}')")
+
+    # Regex fallback for import/export-from variants
+    for match in JS_IMPORT_FROM_RE.finditer(source):
+        stmt = f"import from '{match.group(1)}'"
+        if stmt not in parsed.imports:
+            parsed.imports.append(f"import ... from '{match.group(1)}'")
+    for match in JS_REQUIRE_RE.finditer(source):
+        stmt = f"require('{match.group(1)}')"
+        if stmt not in parsed.imports:
+            parsed.imports.append(stmt)
 
     for class_node in iter_nodes(root, "class_declaration"):
         name_node = class_node.child_by_field_name("name")

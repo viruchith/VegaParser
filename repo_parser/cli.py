@@ -38,10 +38,11 @@ def _parse_files(
     engine: ParserEngine,
     lang_filter: set[str] | None,
     progress_update,
-) -> list:
+) -> tuple[list, dict[str, str]]:
     from repo_parser.models import ParsedFile
 
     parsed_files: list[ParsedFile] = []
+    sources: dict[str, str] = {}
 
     for rel_path in files:
         rel_str = rel_path.as_posix()
@@ -52,6 +53,8 @@ def _parse_files(
             logger.warning("Skipped unreadable file: %s", rel_str)
             progress_update(advance=1)
             continue
+
+        sources[rel_str] = content
 
         if lang_filter:
             detected = detect_language(rel_str)
@@ -78,7 +81,7 @@ def _parse_files(
 
         progress_update(advance=1)
 
-    return parsed_files
+    return parsed_files, sources
 
 
 @app.command("init")
@@ -128,10 +131,10 @@ def init(
     total_steps = len(files) + 1
 
     with parsing_progress(total_steps, "Parsing repository files…") as progress_update:
-        parsed_files = _parse_files(scanner, files, engine, lang_filter, progress_update)
+        parsed_files, sources = _parse_files(scanner, files, engine, lang_filter, progress_update)
 
         progress_update("Generating Markdown knowledge base…")
-        engine.infer_internal_dependencies(parsed_files)
+        engine.infer_internal_dependencies(parsed_files, sources)
         generator = MarkdownGenerator(root)
         index_path = generator.generate(parsed_files)
         progress_update(advance=1)
