@@ -1,0 +1,192 @@
+"""CLI for VegaParser."""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Optional
+
+import typer
+
+from repo_parser.generator.bundle import BUNDLE_FILENAME, BundleError, bundle_knowledge_base, bundle_stats
+from repo_parser.generator.markdown import MarkdownGenerator
+from repo_parser.parser.engine import ParserEngine
+from repo_parser.parser.registry import detect_language, extensions_for_languages, normalize_language_filter
+from repo_parser.traversal.scanner import RepositoryScanner
+from repo_parser.ui.console import console
+from repo_parser.ui.logging_config import setup_logging
+from repo_parser.ui.progress import parsing_progress, run_with_spinner, truncate_filepath
+
+app = typer.Typer(
+    name="repo-parser",
+    help="Parse a code repository and generate an LLM-optimized RAG knowledge base.",
+    add_completion=False,
+    no_args_is_help=True,
+)
+
+logger = logging.getLogger(__name__)
+
+
+@app.callback()
+def _cli_root() -> None:
+    """VegaParser — generate RAG knowledge bases from code repositories."""
+
+
+def _parse_files(
+    scanner: RepositoryScanner,
+    files: list[Path],
+    engine: ParserEngine,
+    lang_filter: set[str] | None,
+    progress_update,
+) -> list:
+    from repo_parser.models import ParsedFile
+
+    parsed_files: list[ParsedFile] = []
+
+    for rel_path in files:
+        rel_str = rel_path.as_posix()
+        progress_update(f"Parsing {truncate_filepath(rel_str)}…")
+
+        content = scanner.read_file(rel_path)
+        if content is None:
+            logger.warning("Skipped unreadable file: %s", rel_str)
+            progress_update(advance=1)
+            continue
+
+        if lang_filter:
+            detected = detect_language(rel_str)
+            if detected not in lang_filter:
+                if not (detected == "yaml" and "kubernetes" in lang_filter):
+                    logger.debug("Skipped by language filter: %s (%s)", rel_str, detected)
+                    progress_update(advance=1)
+                    continue
+            if detected == "yaml" and "kubernetes" in lang_filter and "yaml" not in lang_filter:
+                result = engine.parse_file(rel_str, content)
+                if result is not None and result.language == "kubernetes":
+                    parsed_files.append(result)
+                    logger.debug("Parsed Kubernetes manifest: %s", rel_str)
+                elif result is None:
+                    logger.debug("Skipped non-Kubernetes YAML: %s", rel_str)
+                progress_update(advance=1)
+                continue
+
+        result = engine.parse_file(rel_str, content)
+        if result is not None:
+            parsed_files.append(result)
+        else:
+            logger.warning("Failed to parse or unsupported file: %s", rel_str)
+
+        progress_update(advance=1)
+
+    return parsed_files
+
+
+@app.command("init")
+def init(
+    path: Path = typer.Argument(
+        Path("."),
+        help="Path to the repository root to parse.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+    ),
+    languages: Optional[str] = typer.Option(
+        None,
+        "--languages",
+        "-l",
+        help="Comma-separated languages to parse (e.g. python,javascript).",
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug file logging."),
+) -> None:
+    """Initialize parsing and generate the .rag_kb knowledge base."""
+    log_path = setup_logging(verbose)
+
+    root = path.resolve()
+    lang_filter: set[str] | None = None
+    extensions: set[str] | None = None
+    if languages:
+        lang_filter = normalize_language_filter(languages)
+        extensions = extensions_for_languages(lang_filter)
+        logger.info("Language filter: %s", ", ".join(sorted(lang_filter)))
+
+    logger.info("Starting init scan at %s", root)
+    scanner = RepositoryScanner(root, languages=lang_filter, extensions=extensions)
+
+    files = run_with_spinner(
+        f"Discovering and filtering files in {truncate_filepath(str(root))}…",
+        scanner.discover,
+    )
+
+    if not files:
+        logger.warning("No parseable files found under %s", root)
+        console.print("[yellow]No parseable files found.[/yellow]")
+        raise typer.Exit(code=0)
+
+    logger.info("Discovered %d files to process", len(files))
+    engine = ParserEngine()
+    total_steps = len(files) + 1
+
+    with parsing_progress(total_steps, "Parsing repository files…") as progress_update:
+        parsed_files = _parse_files(scanner, files, engine, lang_filter, progress_update)
+
+        progress_update("Generating Markdown knowledge base…")
+        engine.infer_internal_dependencies(parsed_files)
+        generator = MarkdownGenerator(root)
+        index_path = generator.generate(parsed_files)
+        progress_update(advance=1)
+        logger.info("Wrote knowledge base to %s (%d modules)", index_path.parent, len(parsed_files))
+
+    console.print(
+        f"[green]Generated knowledge base[/green] with [bold]{len(parsed_files)}[/bold] modules."
+    )
+    console.print(f"Project index: [cyan]{index_path}[/cyan]")
+    console.print(f"Log file: [dim]{log_path}[/dim]")
+
+
+@app.command("bundle")
+def bundle(
+    path: Path = typer.Argument(
+        Path("."),
+        help="Path to the repository root containing `.rag_kb/`.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+    ),
+    output: str = typer.Option(
+        BUNDLE_FILENAME,
+        "--output",
+        "-o",
+        help=f"Output filename inside `.rag_kb/` (default: {BUNDLE_FILENAME}).",
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug file logging."),
+) -> None:
+    """Concatenate `.rag_kb/` Markdown files into a single LLM context bundle."""
+    log_path = setup_logging(verbose)
+    root = path.resolve()
+    logger.info("Starting bundle at %s", root)
+
+    try:
+        bundle_path = run_with_spinner(
+            "Bundling knowledge base files…",
+            lambda: bundle_knowledge_base(root, output_name=output),
+        )
+    except BundleError as exc:
+        logger.error("Bundle failed: %s", exc)
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    stats = bundle_stats(bundle_path)
+    logger.info("Bundle written to %s (%s)", bundle_path, stats["size_human"])
+    console.print("[green]Bundle created successfully.[/green]")
+    console.print(f"  Output:      {bundle_path}")
+    console.print(f"  Size:        {stats['size_human']} ({stats['bytes']:,} bytes)")
+    console.print(f"  Characters:  {stats['characters']:,}")
+    console.print(f"  Words:       {stats['words']:,}")
+    console.print(f"  ~Tokens:     {stats['tokens_estimate']:,} (rough estimate, ~4 chars/token)")
+    console.print(f"  Log file:    [dim]{log_path}[/dim]")
+    console.print(
+        "\n[yellow]Warning:[/yellow] This file is intended for LLMs with large context windows. "
+        "Verify your model's context limit before injecting the full bundle."
+    )

@@ -1,0 +1,128 @@
+---
+filepath: {{ filepath }}
+language: {{ language }}
+imports:
+{% for imp in imports %}  - {{ imp | tojson }}
+{% endfor %}exports:
+{% for exp in exports %}  - {{ exp | tojson }}
+{% endfor %}{% if internal_dependencies %}internal_dependencies:
+{% for dep in internal_dependencies %}  - {{ dep | tojson }}
+{% endfor %}{% endif %}{% if external_calls %}external_calls:
+{% for call in external_calls %}  - pattern: {{ call.pattern | tojson }}
+    line: {{ call.line }}
+{% endfor %}{% endif %}{% if external_urls %}external_urls:
+{% for u in external_urls %}  - url: {{ u.url | tojson }}
+    line: {{ u.line }}
+{% endfor %}{% endif %}{% if database_endpoints %}database_endpoints:
+{% for db in database_endpoints %}  - type: {{ db.connection_type | tojson }}
+    host: {{ db.host | tojson }}
+    port: {{ db.port | tojson }}
+    user: {{ db.user | tojson }}
+    schema: {{ db.schema | tojson }}
+    database: {{ db.database | tojson }}
+    line: {{ db.line }}
+{% endfor %}{% endif %}---
+
+# File: `{{ filepath }}`
+
+{% if module_docstring %}
+## Overview
+
+{{ module_docstring }}
+{% else %}
+## Overview
+
+*No module-level documentation found.*
+{% endif %}
+
+{% if imports %}
+## Imports
+
+{% for imp in imports %}
+- `{{ imp }}`
+{% endfor %}
+{% endif %}
+
+{% if classes %}
+## Classes
+
+{% for cls in classes %}
+### {{ cls.name }}
+
+{% if cls.bases %}**Bases:** {{ cls.bases | join(', ') }}
+
+{% endif %}{% if cls.decorators %}**Decorators:** {{ cls.decorators | join(', ') }}
+
+{% endif %}{% if cls.docstring %}
+{{ cls.docstring }}
+
+{% endif %}*Lines {{ cls.line_start }}–{{ cls.line_end }}*
+
+{% if cls.methods %}
+#### Methods
+
+{% for method in cls.methods %}
+##### `{{ method.name }}`
+
+```
+{{ method.signature }}
+```
+
+{% if method.docstring %}{{ method.docstring }}
+
+{% endif %}{% if method.internal_calls %}**Internal calls:** {{ method.internal_calls | join(', ') }}
+
+{% endif %}*Lines {{ method.line_start }}–{{ method.line_end }}*
+
+{% endfor %}
+{% endif %}
+{% endfor %}
+{% endif %}
+
+{% if functions %}
+## Functions
+
+{% for func in functions %}
+### `{{ func.name }}`
+
+```
+{{ func.signature }}
+```
+
+{% if func.decorators %}**Decorators:** {{ func.decorators | join(', ') }}
+
+{% endif %}{% if func.docstring %}{{ func.docstring }}
+
+{% endif %}{% if func.internal_calls %}**Internal calls:** {{ func.internal_calls | join(', ') }}
+
+{% endif %}*Lines {{ func.line_start }}–{{ func.line_end }}*
+
+{% endfor %}
+{% endif %}
+
+{% if external_calls %}
+## External Service Calls
+
+| Pattern | Line | Context |
+|---------|------|---------|
+{% for call in external_calls %}| {{ call.pattern }} | {{ call.line }} | `{{ call.context }}` |
+{% endfor %}
+{% endif %}
+
+{% if external_urls %}
+## External URLs
+
+| URL | Line | Context |
+|-----|------|---------|
+{% for u in external_urls %}| {{ u.url }} | {{ u.line }} | `{{ u.context }}` |
+{% endfor %}
+{% endif %}
+
+{% if database_endpoints %}
+## Database & Connection Endpoints
+
+| Type | Host | Port | User | Schema | Database | Line | Source |
+|------|------|------|------|--------|----------|------|--------|
+{% for db in database_endpoints %}| {{ db.connection_type }} | {{ db.host or '—' }} | {{ db.port or '—' }} | {{ db.user or '—' }} | {{ db.schema or '—' }} | {{ db.database or '—' }} | {{ db.line }} | `{{ db.raw_redacted or db.context }}` |
+{% endfor %}
+{% endif %}

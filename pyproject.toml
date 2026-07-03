@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vegaparser"
+version = "0.1.0"
+description = "Parse code repositories into LLM-optimized RAG knowledge bases with multi-language Tree-sitter indexing, URL detection, and database endpoint extraction"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+keywords = ["rag", "tree-sitter", "code-analysis", "llm", "knowledge-base"]
+dependencies = [
+    "typer>=0.12.0",
+    "rich>=13.8.0",
+    "tree-sitter>=0.23.0",
+    "tree-sitter-language-pack>=1.10.0",
+    "pathspec>=0.12.0",
+    "Jinja2>=3.1.0",
+    "PyYAML>=6.0.0",
+]
+
+[project.scripts]
+repo-parser = "repo_parser.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["repo_parser*"]

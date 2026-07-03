@@ -1,0 +1,99 @@
+---
+title: Project Index
+root: {{ root }}
+generated_by: vegaparser
+file_count: {{ file_count }}
+---
+
+# Project Index: {{ project_name }}
+
+**Root:** `{{ root }}`  
+**Parsed files:** {{ file_count }}
+
+## Tech Stack
+
+{% if stack.python_packages %}
+### Python Dependencies
+
+{% for pkg in stack.python_packages %}
+- {{ pkg }}
+{% endfor %}
+{% endif %}
+
+{% if stack.node_packages %}
+### Node.js Dependencies
+
+{% for pkg in stack.node_packages %}
+- {{ pkg }}
+{% endfor %}
+{% endif %}
+
+{% if stack.go_modules %}
+### Go Modules
+
+{% for mod in stack.go_modules %}
+- {{ mod }}
+{% endfor %}
+{% endif %}
+
+{% if stack.rust_crates %}
+### Rust Crates
+
+{% for crate in stack.rust_crates %}
+- {{ crate }}
+{% endfor %}
+{% endif %}
+
+## Files by Language
+
+| Language | Count |
+|----------|-------|
+{% for lang, count in language_counts.items() %}| {{ lang }} | {{ count }} |
+{% endfor %}
+
+## Module Dependency Graph
+
+{% if dependency_edges %}
+The following internal dependencies were detected between parsed modules:
+
+{% for edge in dependency_edges %}
+- `{{ edge.source }}` → `{{ edge.target }}`
+{% endfor %}
+{% else %}
+*No internal module dependencies detected.*
+{% endif %}
+
+## External URLs (Project-wide)
+
+{% if external_urls %}
+| URL | Found In | Line |
+|-----|----------|------|
+{% for u in external_urls %}| {{ u.url }} | `{{ u.file }}` | {{ u.line }} |
+{% endfor %}
+{% else %}
+*No external URLs detected.*
+{% endif %}
+
+## Database Endpoints (Project-wide)
+
+{% if database_endpoints %}
+| Type | Host | Port | User | Schema | Database | File | Line |
+|------|------|------|------|--------|----------|------|------|
+{% for db in database_endpoints %}| {{ db.type }} | {{ db.host or '—' }} | {{ db.port or '—' }} | {{ db.user or '—' }} | {{ db.schema or '—' }} | {{ db.database or '—' }} | `{{ db.file }}` | {{ db.line }} |
+{% endfor %}
+{% else %}
+*No database connection endpoints detected.*
+{% endif %}
+
+## File Index
+
+| File | Language | Classes | Functions | KB Document |
+|------|----------|---------|-----------|-------------|
+{% for entry in file_index %}| `{{ entry.filepath }}` | {{ entry.language }} | {{ entry.class_count }} | {{ entry.function_count }} | [{{ entry.kb_name }}](modules/{{ entry.kb_name }}) |
+{% endfor %}
+
+## Quick Navigation
+
+{% for entry in file_index %}
+- [{{ entry.filepath }}](modules/{{ entry.kb_name }})
+{% endfor %}
