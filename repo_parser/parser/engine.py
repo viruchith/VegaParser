@@ -18,6 +18,7 @@ from repo_parser.parser.queries.shell_queries import parse_shell
 from repo_parser.parser.queries.sql_queries import parse_sql
 from repo_parser.parser.queries.yaml_queries import parse_yaml
 from repo_parser.parser.registry import detect_language
+from repo_parser.parser.ts_compat import ParserAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,7 @@ class ParserEngine:
                 logger.warning("Tree-sitter grammar not available for: %s", grammar)
                 return None
             try:
-                self._parser_cache[lang_name] = get_parser(grammar)
+                self._parser_cache[lang_name] = ParserAdapter(get_parser(grammar))
             except Exception as exc:
                 logger.warning("Could not load tree-sitter parser for %s: %s", grammar, exc)
                 return None
