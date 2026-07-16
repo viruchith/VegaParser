@@ -9,6 +9,8 @@
 
 Index Python, Go, Rust, Kubernetes YAML, SQL, Dockerfiles, and 20+ more languages — complete with imports, signatures, docstrings, external URLs, and database endpoints.
 
+> **Latest release:** v0.2.0 — incremental caching, hardened secret redaction, full test suite (155 tests, 89% coverage). See [CHANGELOG.md](CHANGELOG.md).
+
 ## Features
 
 - **Tree-sitter AST parsing** — semantic extraction across 20+ languages (Python, JS/TS, Go, Rust, Java, C#, SQL, …)
@@ -64,6 +66,7 @@ python main.py init -l python,go,kubernetes --verbose
 | `PATH` | Repository root (default: `.`) |
 | `-l`, `--languages` | Filter languages (e.g. `python,javascript,terraform`) |
 | `-v`, `--verbose` | DEBUG logging to `repo-parser.log` |
+| `--force` / `--no-cache` | Ignore incremental cache and reparse all files |
 
 ### Bundle for LLM context injection (`bundle`)
 
