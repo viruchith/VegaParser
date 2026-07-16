@@ -1,0 +1,27 @@
+# serializer version: 1
+# name: test_init_module_names_snapshot
+  list([
+    'App_java.md',
+    'Dockerfile.md',
+    '_env.md',
+    'app_cs.md',
+    'app_js.md',
+    'app_rb.md',
+    'app_ts.md',
+    'config_ini.md',
+    'config_sample_py.md',
+    'docker-compose_yml.md',
+    'k8s_deployment_yaml.md',
+    'lib_rs.md',
+    'main_go.md',
+    'main_tf.md',
+    'schema_plsql.md',
+    'schema_sql.md',
+    'script_sh.md',
+  ])
+# ---
+# name: test_languages_filter_only_indexes_python
+  list([
+    'config_sample_py.md',
+  ])
+# ---

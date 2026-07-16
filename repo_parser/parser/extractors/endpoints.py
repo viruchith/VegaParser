@@ -99,7 +99,14 @@ SKIP_URL_PATH_KEYWORDS = (
 
 
 def redact_secrets(value: str) -> str:
-    value = re.sub(r"://([^:/@]+):([^@/]+)@", r"://\1:***@", value)
+    """Redact passwords in connection strings while preserving host/user/db."""
+    # Allow an empty username (e.g. redis://:password@host) by using ``*``.
+    value = re.sub(r"://([^:/@]*):([^@/]+)@", r"://\1:***@", value)
+    value = re.sub(
+        r"(?i)(password|passwd|pwd|secret|token)\s*[=:]\s*['\"]?[^'\"#\s,]+",
+        r"\1=***",
+        value,
+    )
     return value
 
 
