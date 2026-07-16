@@ -24,7 +24,7 @@ Index Python, Go, Rust, Kubernetes YAML, SQL, Dockerfiles, and 20+ more language
 ## Installation
 
 ```bash
-git clone https://github.com/your-org/vegaparser.git
+git clone https://github.com/viruchith/VegaParser.git
 cd vegaparser
 
 python -m venv .venv
