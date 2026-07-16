@@ -35,6 +35,26 @@ SQL_NODE_KINDS = {
     "delete": "DELETE",
 }
 
+SQL_FALLBACK_PATTERNS = [
+    (re.compile(r"\bCREATE\s+TABLE\b", re.I), "TABLE"),
+    (re.compile(r"\bCREATE\s+VIEW\b", re.I), "VIEW"),
+    (re.compile(r"\bCREATE\s+INDEX\b", re.I), "INDEX"),
+    (re.compile(r"\bCREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\b", re.I), "PROCEDURE"),
+    (re.compile(r"\bCREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\b", re.I), "FUNCTION"),
+    (re.compile(r"\bCREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\b", re.I), "TRIGGER"),
+    (re.compile(r"\bALTER\s+TABLE\b", re.I), "ALTER_TABLE"),
+    (re.compile(r"\bDROP\s+TABLE\b", re.I), "DROP_TABLE"),
+    (re.compile(r"\bSELECT\b", re.I), "SELECT"),
+    (re.compile(r"\bINSERT\b", re.I), "INSERT"),
+    (re.compile(r"\bUPDATE\b", re.I), "UPDATE"),
+    (re.compile(r"\bDELETE\b", re.I), "DELETE"),
+]
+
+CREATE_TABLE_NAME_RE = re.compile(
+    r"\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)?)",
+    re.I,
+)
+
 
 def _detect_plsql(source: str) -> bool:
     score = 0
@@ -66,12 +86,47 @@ def _extract_plsql_objects(source: str, parsed: ParsedFile) -> None:
             parsed.exports.append(f"{obj_type} {name}")
 
 
-def parse_sql(filepath: str, source: str, parser) -> ParsedFile:
-    tree = parser.parse(source)
-    root = tree.root_node()
+def _extract_sql_fallback(source: str, parsed: ParsedFile) -> None:
+    seen_stmts: set[str] = set()
+    for pattern, label in SQL_FALLBACK_PATTERNS:
+        for match in pattern.finditer(source):
+            line = source[: match.start()].count("\n") + 1
+            key = f"{label}:{line}"
+            if key in seen_stmts:
+                continue
+            seen_stmts.add(key)
+            snippet = source[match.start() : match.start() + 200].split("\n")[0].strip()
+            parsed.functions.append(
+                FunctionInfo(
+                    name=label,
+                    signature=snippet,
+                    line_start=line,
+                    line_end=line,
+                )
+            )
+            parsed.exports.append(label)
 
+    for match in CREATE_TABLE_NAME_RE.finditer(source):
+        line = source[: match.start()].count("\n") + 1
+        table_name = match.group(1).strip()
+        parsed.classes.append(
+            ClassInfo(name=table_name, docstring="Database table", line_start=line, line_end=line)
+        )
+
+
+def parse_sql(filepath: str, source: str, parser) -> ParsedFile:
     is_plsql = _detect_plsql(source) or filepath.lower().endswith((".plsql", ".pls", ".pkb", ".pks"))
     parsed = ParsedFile(filepath=filepath, language="plsql" if is_plsql else "sql")
+
+    if parser is None:
+        _extract_sql_fallback(source, parsed)
+        if is_plsql:
+            _extract_plsql_objects(source, parsed)
+            parsed.module_docstring = "Oracle PL/SQL script with packages, procedures, or blocks."
+        return parsed
+
+    tree = parser.parse(source)
+    root = tree.root_node()
 
     seen_stmts: set[str] = set()
     for node in iter_nodes(root):

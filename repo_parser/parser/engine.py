@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
+from dataclasses import asdict
 import logging
 
 from tree_sitter_language_pack import get_parser, has_language
 
+from repo_parser.cache import _dict_to_parsed_file
 from repo_parser.models import ParsedFile
 from repo_parser.parser.dependencies import infer_internal_dependencies as infer_file_dependencies
 from repo_parser.parser.extractors.endpoints import enrich_parsed_file
@@ -28,6 +32,31 @@ logger = logging.getLogger(__name__)
 
 def _make_common(lang: str):
     return lambda fp, src, parser: parse_common(fp, src, parser, lang)
+
+
+def _grammar_for_language(lang_name: str) -> str:
+    if lang_name == "kubernetes":
+        return "yaml"
+    if lang_name == "plsql":
+        return "sql"
+    if lang_name == "shell":
+        return "bash"
+    return lang_name
+
+
+def _parse_file_isolated(filepath: str, source: str, lang_name: str) -> dict | None:
+    parser_fn = PARSERS.get(lang_name)
+    if parser_fn is None:
+        return None
+    grammar = _grammar_for_language(lang_name)
+    if not has_language(grammar):
+        return None
+    parser = ParserAdapter(get_parser(grammar))
+    result = parser_fn(filepath, source, parser)
+    if result is None:
+        return None
+    enrich_parsed_file(result, source)
+    return asdict(result)
 
 
 PARSERS = {
@@ -61,28 +90,57 @@ class ParserEngine:
     """Parse source files using tree-sitter."""
 
     def __init__(self) -> None:
-        self._parser_cache: dict[str, object] = {}
+        self._isolated_executor: ProcessPoolExecutor | None = None
 
-    def _get_parser(self, lang_name: str):
-        if lang_name not in self._parser_cache:
-            grammar = lang_name
-            if lang_name == "kubernetes":
-                grammar = "yaml"
-            elif lang_name == "plsql":
-                grammar = "sql"
-            elif lang_name == "shell":
-                grammar = "bash"
-            elif lang_name == "csharp":
-                grammar = "csharp"
-            if not has_language(grammar):
-                logger.warning("Tree-sitter grammar not available for: %s", grammar)
-                return None
-            try:
-                self._parser_cache[lang_name] = ParserAdapter(get_parser(grammar))
-            except Exception as exc:
-                logger.warning("Could not load tree-sitter parser for %s: %s", grammar, exc)
-                return None
-        return self._parser_cache[lang_name]
+    def _ensure_executor(self) -> ProcessPoolExecutor:
+        if self._isolated_executor is None:
+            self._isolated_executor = ProcessPoolExecutor(max_workers=1)
+        return self._isolated_executor
+
+    def _reset_executor(self) -> None:
+        if self._isolated_executor is not None:
+            self._isolated_executor.shutdown(wait=False, cancel_futures=True)
+            self._isolated_executor = None
+
+    def _parse_with_isolation(self, filepath: str, source: str, lang_name: str) -> ParsedFile | None:
+        executor = self._ensure_executor()
+        try:
+            parsed_data = executor.submit(_parse_file_isolated, filepath, source, lang_name).result()
+        except BrokenProcessPool:
+            logger.error(
+                "Native parser crashed while parsing %s (%s); skipping file safely.",
+                filepath,
+                lang_name,
+            )
+            self._reset_executor()
+            return None
+        except Exception as exc:
+            logger.error(
+                "Failed to parse %s (%s): %s",
+                filepath,
+                lang_name,
+                exc,
+                exc_info=logger.isEnabledFor(logging.DEBUG),
+            )
+            return None
+
+        if parsed_data is None:
+            return None
+
+        try:
+            result = _dict_to_parsed_file(parsed_data)
+        except Exception as exc:
+            logger.error("Failed to deserialize parsed output for %s: %s", filepath, exc)
+            return None
+
+        logger.debug(
+            "Parsed %s [%s]: %d classes, %d functions",
+            filepath,
+            lang_name,
+            len(result.classes),
+            len(result.functions),
+        )
+        return result
 
     def parse_file(self, filepath: str, source: str) -> ParsedFile | None:
         lang_name = detect_language(filepath)
@@ -95,7 +153,7 @@ class ParserEngine:
             return None
 
         # Config-only parsers don't need tree-sitter
-        if lang_name in ("env", "properties", "ini", "java"):
+        if lang_name in ("env", "properties", "ini", "java", "sql", "plsql"):
             try:
                 result = parser_fn(filepath, source, None)
                 return result
@@ -103,33 +161,10 @@ class ParserEngine:
                 logger.error("Failed to parse config file %s: %s", filepath, exc)
                 return None
 
-        parser = self._get_parser(lang_name)
-        if parser is None:
-            return None
-
-        try:
-            result = parser_fn(filepath, source, parser)
-            if result is not None:
-                enrich_parsed_file(result, source)
-                logger.debug(
-                    "Parsed %s [%s]: %d classes, %d functions",
-                    filepath,
-                    lang_name,
-                    len(result.classes),
-                    len(result.functions),
-                )
-            else:
-                logger.warning("No parse result for %s (%s)", filepath, lang_name)
-            return result
-        except Exception as exc:
-            logger.error(
-                "Failed to parse %s (%s): %s",
-                filepath,
-                lang_name,
-                exc,
-                exc_info=logger.isEnabledFor(logging.DEBUG),
-            )
-            return None
+        result = self._parse_with_isolation(filepath, source, lang_name)
+        if result is None:
+            logger.warning("No parse result for %s (%s)", filepath, lang_name)
+        return result
 
     def infer_internal_dependencies(
         self,
