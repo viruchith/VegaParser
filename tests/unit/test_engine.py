@@ -10,6 +10,7 @@ from repo_parser.parser.engine import ParserEngine
 PY_SRC = "import os\n\n\nclass Foo:\n    def bar(self):\n        return 1\n\n\ndef baz():\n    return 2\n"
 GO_SRC = 'package main\n\nimport "fmt"\n\nfunc main() {\n\tfmt.Println("hi")\n}\n'
 JS_SRC = "class C {\n  m() { return fetch('https://x.com'); }\n}\nfunction f() { return 1; }\n"
+JAVA_SRC = "import java.util.List;\n\npublic class Foo {\n  public int bar(String s) { return 1; }\n}\n"
 YAML_SRC = "services:\n  db:\n    image: postgres:15\n"
 SQL_SRC = "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(50));\n"
 HCL_SRC = 'resource "aws_s3_bucket" "b" {\n  bucket = "my-bucket"\n}\n'
@@ -28,6 +29,7 @@ def engine():
         ("mod.py", PY_SRC, "python"),
         ("main.go", GO_SRC, "go"),
         ("app.js", JS_SRC, "javascript"),
+        ("Foo.java", JAVA_SRC, "java"),
         ("compose.yml", YAML_SRC, "yaml"),
         ("schema.sql", SQL_SRC, "sql"),
         ("main.tf", HCL_SRC, "terraform"),
