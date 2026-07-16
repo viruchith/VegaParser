@@ -8,8 +8,9 @@ from typing import Optional
 
 import typer
 
+from repo_parser.cache import IndexCache, _parsed_file_to_dict, compute_hash
 from repo_parser.generator.bundle import BUNDLE_FILENAME, BundleError, bundle_knowledge_base, bundle_stats
-from repo_parser.generator.markdown import MarkdownGenerator
+from repo_parser.generator.markdown import MarkdownGenerator, sanitize_filename
 from repo_parser.parser.engine import ParserEngine
 from repo_parser.parser.registry import detect_language, extensions_for_languages, normalize_language_filter
 from repo_parser.traversal.scanner import RepositoryScanner
@@ -38,10 +39,30 @@ def _parse_files(
     engine: ParserEngine,
     lang_filter: set[str] | None,
     progress_update,
-) -> list:
+    cache: IndexCache,
+    modules_dir: Path,
+    force: bool,
+) -> tuple[list, int]:
     from repo_parser.models import ParsedFile
 
     parsed_files: list[ParsedFile] = []
+    fresh_count = 0
+
+    def _get_or_parse(rel_str: str, content: str):
+        """Return (ParsedFile|None, from_cache) using the incremental cache."""
+        nonlocal fresh_count
+        content_hash = compute_hash(content)
+        module_file = modules_dir / sanitize_filename(rel_str)
+        if not force and cache.is_cached(rel_str, content_hash, module_file):
+            cached = cache.get_cached_parsed_file(rel_str)
+            if cached is not None:
+                logger.debug("Cache hit: %s", rel_str)
+                return cached, True
+        result = engine.parse_file(rel_str, content)
+        if result is not None:
+            cache.update(rel_str, content_hash, _parsed_file_to_dict(result))
+            fresh_count += 1
+        return result, False
 
     for rel_path in files:
         rel_str = rel_path.as_posix()
@@ -61,7 +82,7 @@ def _parse_files(
                     progress_update(advance=1)
                     continue
             if detected == "yaml" and "kubernetes" in lang_filter and "yaml" not in lang_filter:
-                result = engine.parse_file(rel_str, content)
+                result, _ = _get_or_parse(rel_str, content)
                 if result is not None and result.language == "kubernetes":
                     parsed_files.append(result)
                     logger.debug("Parsed Kubernetes manifest: %s", rel_str)
@@ -70,7 +91,7 @@ def _parse_files(
                 progress_update(advance=1)
                 continue
 
-        result = engine.parse_file(rel_str, content)
+        result, _ = _get_or_parse(rel_str, content)
         if result is not None:
             parsed_files.append(result)
         else:
@@ -78,7 +99,7 @@ def _parse_files(
 
         progress_update(advance=1)
 
-    return parsed_files
+    return parsed_files, fresh_count
 
 
 @app.command("init")
@@ -98,6 +119,12 @@ def init(
         help="Comma-separated languages to parse (e.g. python,javascript).",
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug file logging."),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "--no-cache",
+        help="Ignore cache and reparse all files.",
+    ),
 ) -> None:
     """Initialize parsing and generate the .rag_kb knowledge base."""
     log_path = setup_logging(verbose)
@@ -127,18 +154,38 @@ def init(
     engine = ParserEngine()
     total_steps = len(files) + 1
 
+    rag_kb_dir = root / ".rag_kb"
+    modules_dir = rag_kb_dir / "modules"
+    cache = IndexCache(rag_kb_dir)
+    if not force:
+        cache.load()
+
+    # Purge cache entries and module files for sources that no longer exist.
+    current_rel_paths = {rel.as_posix() for rel in files}
+    for stale_path in sorted(cache.known_paths() - current_rel_paths):
+        stale_module = modules_dir / sanitize_filename(stale_path)
+        if stale_module.exists():
+            stale_module.unlink()
+            logger.debug("Removed stale module file: %s", stale_module)
+        cache.remove(stale_path)
+
     with parsing_progress(total_steps, "Parsing repository files…") as progress_update:
-        parsed_files = _parse_files(scanner, files, engine, lang_filter, progress_update)
+        parsed_files, fresh_count = _parse_files(
+            scanner, files, engine, lang_filter, progress_update, cache, modules_dir, force
+        )
 
         progress_update("Generating Markdown knowledge base…")
         engine.infer_internal_dependencies(parsed_files)
         generator = MarkdownGenerator(root)
         index_path = generator.generate(parsed_files)
+        cache.save()
         progress_update(advance=1)
         logger.info("Wrote knowledge base to %s (%d modules)", index_path.parent, len(parsed_files))
 
+    cached_count = len(parsed_files) - fresh_count
     console.print(
-        f"[green]Generated knowledge base[/green] with [bold]{len(parsed_files)}[/bold] modules."
+        f"[green]Generated knowledge base[/green] with [bold]{len(parsed_files)}[/bold] modules "
+        f"([bold]{fresh_count}[/bold] parsed, [bold]{cached_count}[/bold] from cache)."
     )
     console.print(f"Project index: [cyan]{index_path}[/cyan]")
     console.print(f"Log file: [dim]{log_path}[/dim]")

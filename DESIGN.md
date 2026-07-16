@@ -82,7 +82,12 @@ CLI bundle [PATH]
 - **Stateless per run.** Each `init` invocation is independent.
 - **In-memory aggregation:** `list[ParsedFile]` collected during traversal; passed to generator at end.
 - **Output:** `.rag_kb/modules/<sanitized_path>.md` + `.rag_kb/project_index.md`
-- **No database or cache** in v1.
+- **Incremental cache:** A per-repo manifest at `.rag_kb/.cache/manifest.json` maps each
+  source's relative path to a SHA-256 content hash and its serialized `ParsedFile`. On
+  subsequent `init` runs, files whose hash is unchanged (and whose module file still exists)
+  are restored from the cache instead of being re-parsed. Entries for deleted sources are
+  purged along with their generated module files. The `--force`/`--no-cache` flag bypasses
+  the cache and forces a full reparse.
 
 ## File Traversal Strategy
 
