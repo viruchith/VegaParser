@@ -57,18 +57,22 @@ class IndexCache:
         self._manifest: dict[str, dict] = {}
 
     def load(self) -> None:
+        logger.debug("Loading cache manifest from %s", self.manifest_path)
         if self.manifest_path.is_file():
             try:
                 self._manifest = json.loads(self.manifest_path.read_text("utf-8"))
+                logger.info("Loaded cache manifest with %d entries", len(self._manifest))
             except (OSError, json.JSONDecodeError) as exc:
                 logger.warning("Could not load cache manifest: %s", exc)
                 self._manifest = {}
         else:
             self._manifest = {}
+            logger.debug("No cache manifest found at %s", self.manifest_path)
 
     def save(self) -> None:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.manifest_path.write_text(json.dumps(self._manifest, indent=2), "utf-8")
+        logger.info("Saved cache manifest with %d entries to %s", len(self._manifest), self.manifest_path)
 
     def is_cached(self, rel_path: str, content_hash: str, module_file: Path) -> bool:
         entry = self._manifest.get(rel_path)
@@ -91,9 +95,11 @@ class IndexCache:
         if parsed_data is not None:
             entry["parsed"] = parsed_data
         self._manifest[rel_path] = entry
+        logger.debug("Updated cache entry: %s", rel_path)
 
     def remove(self, rel_path: str) -> None:
         self._manifest.pop(rel_path, None)
+        logger.debug("Removed cache entry: %s", rel_path)
 
     def known_paths(self) -> set[str]:
         return set(self._manifest.keys())

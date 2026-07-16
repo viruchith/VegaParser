@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import typer
 
@@ -118,7 +118,13 @@ def init(
         "-l",
         help="Comma-separated languages to parse (e.g. python,javascript).",
     ),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug file logging."),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging."),
+    log_target: Literal["file", "console", "both"] = typer.Option(
+        "file",
+        "--log-target",
+        help="Write logs to file, console, or both.",
+        case_sensitive=False,
+    ),
     force: bool = typer.Option(
         False,
         "--force",
@@ -127,7 +133,7 @@ def init(
     ),
 ) -> None:
     """Initialize parsing and generate the .rag_kb knowledge base."""
-    log_path = setup_logging(verbose)
+    log_path = setup_logging(verbose, log_target=log_target.lower())
 
     root = path.resolve()
     lang_filter: set[str] | None = None
@@ -138,6 +144,7 @@ def init(
         logger.info("Language filter: %s", ", ".join(sorted(lang_filter)))
 
     logger.info("Starting init scan at %s", root)
+    logger.debug("Init options: languages=%s force=%s log_target=%s", languages, force, log_target)
     scanner = RepositoryScanner(root, languages=lang_filter, extensions=extensions)
 
     files = run_with_spinner(
@@ -159,6 +166,8 @@ def init(
     cache = IndexCache(rag_kb_dir)
     if not force:
         cache.load()
+    else:
+        logger.info("Cache bypass enabled via --force/--no-cache")
 
     # Purge cache entries and module files for sources that no longer exist.
     current_rel_paths = {rel.as_posix() for rel in files}
@@ -170,11 +179,19 @@ def init(
         cache.remove(stale_path)
 
     with parsing_progress(total_steps, "Parsing repository files…") as progress_update:
+        logger.info("Starting parse phase for %d files", len(files))
         parsed_files, fresh_count = _parse_files(
             scanner, files, engine, lang_filter, progress_update, cache, modules_dir, force
         )
+        logger.info(
+            "Parse phase complete: parsed_files=%d fresh=%d cached=%d",
+            len(parsed_files),
+            fresh_count,
+            len(parsed_files) - fresh_count,
+        )
 
         progress_update("Generating Markdown knowledge base…")
+        logger.info("Starting markdown generation")
         engine.infer_internal_dependencies(parsed_files)
         generator = MarkdownGenerator(root)
         index_path = generator.generate(parsed_files)
@@ -188,7 +205,10 @@ def init(
         f"([bold]{fresh_count}[/bold] parsed, [bold]{cached_count}[/bold] from cache)."
     )
     console.print(f"Project index: [cyan]{index_path}[/cyan]")
-    console.print(f"Log file: [dim]{log_path}[/dim]")
+    if log_path is not None:
+        console.print(f"Log file: [dim]{log_path}[/dim]")
+    else:
+        console.print("Log target: [dim]console[/dim]")
 
 
 @app.command("bundle")
@@ -207,12 +227,19 @@ def bundle(
         "-o",
         help=f"Output filename inside `.rag_kb/` (default: {BUNDLE_FILENAME}).",
     ),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug file logging."),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging."),
+    log_target: Literal["file", "console", "both"] = typer.Option(
+        "file",
+        "--log-target",
+        help="Write logs to file, console, or both.",
+        case_sensitive=False,
+    ),
 ) -> None:
     """Concatenate `.rag_kb/` Markdown files into a single LLM context bundle."""
-    log_path = setup_logging(verbose)
+    log_path = setup_logging(verbose, log_target=log_target.lower())
     root = path.resolve()
     logger.info("Starting bundle at %s", root)
+    logger.debug("Bundle options: output=%s log_target=%s", output, log_target)
 
     try:
         bundle_path = run_with_spinner(
@@ -232,7 +259,10 @@ def bundle(
     console.print(f"  Characters:  {stats['characters']:,}")
     console.print(f"  Words:       {stats['words']:,}")
     console.print(f"  ~Tokens:     {stats['tokens_estimate']:,} (rough estimate, ~4 chars/token)")
-    console.print(f"  Log file:    [dim]{log_path}[/dim]")
+    if log_path is not None:
+        console.print(f"  Log file:    [dim]{log_path}[/dim]")
+    else:
+        console.print("  Log target:  [dim]console[/dim]")
     console.print(
         "\n[yellow]Warning:[/yellow] This file is intended for LLMs with large context windows. "
         "Verify your model's context limit before injecting the full bundle."

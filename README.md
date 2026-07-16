@@ -179,6 +179,7 @@ Scans `PATH` (default: current directory), parses every supported source file, a
 | `PATH` | — | directory | `.` | Repository root to index |
 | `--languages` | `-l` | string | all | Comma-separated language filter, e.g. `python,go,kubernetes` |
 | `--verbose` | `-v` | flag | off | Write DEBUG-level details to `repo-parser.log` |
+| `--log-target` | — | `file\\|console\\|both` | `file` | Choose where logs are written |
 | `--force` / `--no-cache` | — | flag | off | Bypass the incremental cache; reparse every file from scratch |
 
 **Examples:**
@@ -220,6 +221,7 @@ Concatenates all files in `.rag_kb/` into a single `full_repo_context.md` ordere
 | `PATH` | — | directory | `.` | Repository root (must contain `.rag_kb/`) |
 | `--output` | `-o` | string | `full_repo_context.md` | Output filename inside `.rag_kb/` |
 | `--verbose` | `-v` | flag | off | Write DEBUG-level details to `repo-parser.log` |
+| `--log-target` | — | `file\\|console\\|both` | `file` | Choose where logs are written |
 
 **Examples:**
 
@@ -372,17 +374,24 @@ After Tree-sitter parsing, every file is scanned by `endpoints.py` regardless of
 
 ## Logging
 
-VegaParser never writes to stdout during parsing — that bandwidth belongs to the Rich progress bar.
+VegaParser supports configurable log output targets so debugging can happen either in files, in the terminal, or both.
 
-| Level | Written when | Location |
-|-------|-------------|----------|
-| `INFO` | Always | `repo-parser.log` in the working directory |
-| `DEBUG` | `--verbose` flag | `repo-parser.log` |
+| Option | Effect |
+|--------|--------|
+| `--verbose` | Sets log level to `DEBUG` (default is `INFO`) |
+| `--log-target file` | Write logs to `repo-parser.log` (default) |
+| `--log-target console` | Stream logs to terminal output |
+| `--log-target both` | Write to file and terminal simultaneously |
 
 ```bash
-# Tail logs while running
-repo-parser init --verbose &
-tail -f repo-parser.log
+# File logging (default)
+repo-parser init --verbose --log-target file
+
+# Console-only logging
+repo-parser init --verbose --log-target console
+
+# File + console logging
+repo-parser bundle --verbose --log-target both
 ```
 
 ---
