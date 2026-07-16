@@ -163,6 +163,12 @@ Runs on **all** parsed files after tree-sitter extraction. Regex-based, language
 
 Passwords are redacted in output (`***`).
 
+### Known Limitations
+1. **Multi-line credentials**: Connection strings split across string concatenation are not detected or redacted.
+2. **F-string interpolation**: `f"postgres://{user}:{password}@host"` will not have credentials redacted.
+3. **Commented-out lines**: Lines starting with `#` are NOT excluded from extraction (deliberate).
+4. **False positives**: Variables with names containing `host`, `port`, etc. as substrings are not guaranteed to be excluded by all patterns.
+
 ## Markdown Generation
 
 ### Module file (`module.md.j2`)

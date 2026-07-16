@@ -94,7 +94,8 @@ SKIP_URL_HOSTS = frozenset({"localhost", "127.0.0.1", "0.0.0.0"})
 
 def redact_secrets(value: str) -> str:
     """Redact passwords in connection strings while preserving host/user/db."""
-    value = re.sub(r"://([^:/@]+):([^@/]+)@", r"://\1:***@", value)
+    # Allow an empty username (e.g. redis://:password@host) by using ``*``.
+    value = re.sub(r"://([^:/@]*):([^@/]+)@", r"://\1:***@", value)
     value = re.sub(
         r"(?i)(password|passwd|pwd|secret|token)\s*[=:]\s*['\"]?[^'\"#\s,]+",
         r"\1=***",
