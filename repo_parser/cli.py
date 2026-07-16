@@ -74,8 +74,6 @@ def _parse_files(
             progress_update(advance=1)
             continue
 
-        sources[rel_str] = content
-
         if lang_filter:
             detected = detect_language(rel_str)
             if detected not in lang_filter:

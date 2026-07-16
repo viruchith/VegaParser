@@ -7,6 +7,7 @@ import logging
 from tree_sitter_language_pack import get_parser, has_language
 
 from repo_parser.models import ParsedFile
+from repo_parser.parser.dependencies import infer_internal_dependencies as infer_file_dependencies
 from repo_parser.parser.extractors.endpoints import enrich_parsed_file
 from repo_parser.parser.queries.common_queries import PROFILES, parse_common
 from repo_parser.parser.queries.docker_queries import parse_dockerfile
@@ -135,7 +136,7 @@ class ParserEngine:
         parsed_files: list[ParsedFile],
         sources: dict[str, str] | None = None,
     ) -> None:
-        infer_internal_dependencies(parsed_files, sources)
+        infer_file_dependencies(parsed_files, sources)
 
     @staticmethod
     def _resolve_relative(from_path: str, import_path: str) -> str | None:
