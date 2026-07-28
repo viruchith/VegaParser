@@ -21,6 +21,13 @@ Index Python, Go, Rust, Kubernetes YAML, SQL, Dockerfiles, and 20+ more language
 - **Rich progress UI** — spinner + progress bar; logs go to `repo-parser.log` (never breaks the terminal)
 - **Verbose file logging** — `--verbose` captures DEBUG-level AST and skip details in `repo-parser.log`
 
+## Changelog
+
+### 0.1.1
+
+- Faster large-repo indexing through directory pruning, parallel parsing, incremental cache reuse, and reduced AST passes.
+- Added a benchmark script for popular open-source repositories across supported language groups.
+
 ## Installation
 
 ```bash
@@ -132,6 +139,19 @@ python main.py bundle
 cat repo-parser.log          # inspect file logs
 cat .rag_kb/project_index.md
 ```
+
+## Benchmarking
+
+Run the curated benchmark suite against popular open-source repositories:
+
+```bash
+python scripts/benchmark_vegaparser.py --list
+python scripts/benchmark_vegaparser.py --tier heavy
+python scripts/benchmark_vegaparser.py --language java --warm
+python scripts/benchmark_vegaparser.py --json benchmark-results.json
+```
+
+Benchmarks clone repositories into `~/.cache/vegaparser-benchmarks/` by default, run `repo_parser` from `main.py`, and report cold-run timing plus an optional warm-cache pass.
 
 ## License
 

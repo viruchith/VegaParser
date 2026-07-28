@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vegaparser"
-version = "0.1.0"
+version = "0.1.1"
 description = "Parse code repositories into LLM-optimized RAG knowledge bases with multi-language Tree-sitter indexing, URL detection, and database endpoint extraction"
 readme = "README.md"
 requires-python = ">=3.10"
