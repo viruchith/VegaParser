@@ -30,11 +30,11 @@ Versions follow [Semantic Versioning](https://semver.org/).
   the git clone command — the flag created blobless clones with empty working trees; replaced the
   unreachable targets (`torvalds/linux`, `llvm/llvm-project`) with practical alternatives
   (`curl/curl` for C, `grpc/grpc` for C++).
-- Fixed `modules=0` for all `plsql` targets: PL/SQL-specific extensions (`.plsql`, `.pls`,
-  `.pkb`, `.pks`) now return `"plsql"` from `detect_language` instead of `"sql"`, so
-  `--languages plsql` correctly filters PL/SQL source files. The `plsql-heavy` and `plsql-light`
-  benchmark targets now also scan `.sql` files (`("plsql", "sql")` language tuple) because most
-  PL/SQL repos use the `.sql` extension.
+- Fixed `OSError [Errno 66] Directory not empty` crash during benchmark cleanup on macOS/Python
+  3.14: `clear_generated_outputs` now catches `OSError` from `shutil.rmtree` and falls back to
+  `subprocess rm -rf`, which is immune to the fd-based traversal issue that trips Python 3.14's
+  `_rmtree_safe_fd` on `.rag_kb` directories containing over-long filenames written before the
+  `sanitize_filename` fix.
 
 ### Changed
 
