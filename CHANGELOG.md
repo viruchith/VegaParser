@@ -52,6 +52,20 @@ Versions follow [Semantic Versioning](https://semver.org/).
   - final summary table
 - Added `--verbose` for detailed step logs (clone/cache actions, per-run timings, and failure stderr tail).
 
+#### Benchmark baseline results
+- Full-suite cold benchmark (`42` targets, `repeat=1`, `warm=False`) now completes end-to-end with
+  `rc=0` / `status=ok` across the suite after the stability and target fixes.
+- Previously failing/incorrect targets now produce valid non-zero outputs:
+  - `kotlin-heavy`: `51.00s`, `67240` modules (no filename-length crash)
+  - `c-heavy` / `cpp-heavy`: `1.84s` / `5.45s`, `1014` / `1911` modules (no blobless empty clone)
+  - `plsql-heavy` / `plsql-light`: `3.45s` / `0.75s`, `89` / `262` modules (correct language mapping)
+- Current cold-run heavy-tier hotspots by wall time:
+  - `csharp-heavy` (`110.99s`)
+  - `kotlin-heavy` (`51.00s`)
+  - `typescript-heavy` (`43.19s`)
+  - `go-heavy` (`40.09s`)
+  - `rust-heavy` (`36.68s`)
+
 ---
 
 ## [0.2.0] — 2026-07-16
