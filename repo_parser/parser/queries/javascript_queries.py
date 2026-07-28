@@ -7,12 +7,15 @@ import re
 from repo_parser.models import ClassInfo, ExternalCall, FunctionInfo, ParsedFile
 from repo_parser.parser.queries.base import (
     build_js_signature,
+    child_count,
     find_child_by_kind,
     iter_nodes,
     line_end,
     line_number,
     node_kind,
+    node_parent,
     node_text,
+    parse_root,
     strip_docstring_quotes,
 )
 
@@ -31,7 +34,7 @@ EXTERNAL_CALL_PATTERNS = [
 
 def _extract_leading_comment(root, source: str) -> str | None:
     comments = []
-    for i in range(root.child_count()):
+    for i in range(child_count(root)):
         child = root.child(i)
         if node_kind(child) == "comment":
             text = node_text(source, child).strip()
@@ -46,7 +49,7 @@ def _extract_leading_comment(root, source: str) -> str | None:
 
 
 def _extract_class_docstring(source: str, class_node) -> str | None:
-    for i in range(class_node.child_count()):
+    for i in range(child_count(class_node)):
         child = class_node.child(i)
         if node_kind(child) == "comment":
             text = node_text(source, child)
@@ -56,13 +59,13 @@ def _extract_class_docstring(source: str, class_node) -> str | None:
 
 
 def _is_exported(node) -> bool:
-    parent = node.parent()
+    parent = node_parent(node)
     while parent:
         if node_kind(parent) in ("export_statement", "export_declaration"):
             return True
         if node_kind(parent) == "program":
             return False
-        parent = parent.parent()
+        parent = node_parent(parent)
     return False
 
 
@@ -74,18 +77,17 @@ def _is_require_call(node, source: str) -> bool:
 
 
 def _parent_class_name(node, source: str) -> str | None:
-    parent = node.parent()
+    parent = node_parent(node)
     while parent:
         if node_kind(parent) == "class_declaration":
             name_node = parent.child_by_field_name("name")
             return node_text(source, name_node) if name_node else None
-        parent = parent.parent()
+        parent = node_parent(parent)
     return None
 
 
 def parse_javascript(filepath: str, source: str, parser, lang_name: str = "javascript") -> ParsedFile:
-    tree = parser.parse(source)
-    root = tree.root_node()
+    _tree, root = parse_root(parser, source)
 
     parsed = ParsedFile(
         filepath=filepath,
@@ -119,8 +121,8 @@ def parse_javascript(filepath: str, source: str, parser, lang_name: str = "javas
                 name=class_name,
                 docstring=_extract_class_docstring(source, node),
                 methods=class_methods.setdefault(class_name, []),
-                line_start=line_number(node),
-                line_end=line_end(node),
+                line_start=line_number(source, node),
+                line_end=line_end(source, node),
             )
             parsed.classes.append(class_info)
             parsed.exports.append(class_name)
@@ -138,8 +140,8 @@ def parse_javascript(filepath: str, source: str, parser, lang_name: str = "javas
                     signature=build_js_signature(source, node, method_name),
                     is_method=True,
                     parent_class=class_name,
-                    line_start=line_number(node),
-                    line_end=line_end(node),
+                    line_start=line_number(source, node),
+                    line_end=line_end(source, node),
                 )
             )
             continue
@@ -153,8 +155,8 @@ def parse_javascript(filepath: str, source: str, parser, lang_name: str = "javas
                 FunctionInfo(
                     name=func_name,
                     signature=build_js_signature(source, node, func_name),
-                    line_start=line_number(node),
-                    line_end=line_end(node),
+                    line_start=line_number(source, node),
+                    line_end=line_end(source, node),
                 )
             )
             if _is_exported(node):
@@ -167,7 +169,7 @@ def parse_javascript(filepath: str, source: str, parser, lang_name: str = "javas
                 continue
             call_text = node_text(source, func_node)
             full_call = node_text(source, node)
-            line = line_number(node)
+            line = line_number(source, node)
             for pattern, label in EXTERNAL_CALL_PATTERNS:
                 if pattern.search(call_text) or pattern.search(full_call):
                     key = (line, label)

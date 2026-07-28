@@ -7,11 +7,14 @@ from dataclasses import dataclass
 
 from repo_parser.models import ClassInfo, FunctionInfo, ParsedFile
 from repo_parser.parser.queries.base import (
+    child_count,
     iter_nodes,
     line_end,
     line_number,
     node_kind,
+    node_parent,
     node_text,
+    parse_root,
 )
 
 NAME_FIELDS = ("name", "declarator", "identifier")
@@ -37,7 +40,7 @@ def _get_name(source: str, node) -> str | None:
             text = node_text(source, child).strip()
             if text:
                 return text.lstrip("#").strip()
-    for i in range(node.child_count()):
+    for i in range(child_count(node)):
         child = node.child(i)
         kind = node_kind(child)
         if kind in ("identifier", "type_identifier", "property_identifier", "field_identifier", "name"):
@@ -48,42 +51,42 @@ def _get_name(source: str, node) -> str | None:
 
 
 def _is_module_level(node, module_kinds: tuple[str, ...]) -> bool:
-    parent = node.parent()
+    parent = node_parent(node)
     while parent:
         if node_kind(parent) in module_kinds:
             return True
         if node_kind(parent) in ("class_declaration", "class_definition", "class", "class_body", "declaration_list", "impl_item", "block"):
             return False
-        parent = parent.parent()
+        parent = node_parent(parent)
     return False
 
 
 def _is_nested_function(node) -> bool:
-    parent = node.parent()
+    parent = node_parent(node)
     while parent:
         if node_kind(parent) in ("function_declaration", "function_definition", "function_item", "method_declaration", "function"):
             return True
         if node_kind(parent) in ("source_file", "program", "module", "class_declaration", "class_definition", "class", "impl_item"):
             return False
-        parent = parent.parent()
+        parent = node_parent(parent)
     return False
 
 
 def _parent_class(source: str, node) -> str | None:
-    parent = node.parent()
+    parent = node_parent(node)
     while parent:
         kind = node_kind(parent)
         if kind in ("class_declaration", "class_definition", "class", "class_specifier", "struct_item", "impl_item"):
             name = _get_name(source, parent)
             if name:
                 return name
-        parent = parent.parent()
+        parent = node_parent(parent)
     return None
 
 
 def _extract_leading_comments(root, source: str, comment_kinds: tuple[str, ...]) -> str | None:
     comments: list[str] = []
-    for i in range(root.child_count()):
+    for i in range(child_count(root)):
         child = root.child(i)
         kind = node_kind(child)
         if kind in comment_kinds:
@@ -113,8 +116,7 @@ def _build_signature(source: str, node, name: str, language: str) -> str:
 
 
 def parse_with_profile(filepath: str, source: str, parser, profile: LanguageProfile) -> ParsedFile:
-    tree = parser.parse(source)
-    root = tree.root_node()
+    _tree, root = parse_root(parser, source)
 
     parsed = ParsedFile(
         filepath=filepath,
@@ -140,8 +142,8 @@ def parse_with_profile(filepath: str, source: str, parser, profile: LanguageProf
                 continue
             class_info = ClassInfo(
                 name=name,
-                line_start=line_number(node),
-                line_end=line_end(node),
+                line_start=line_number(source, node),
+                line_end=line_end(source, node),
             )
             parsed.classes.append(class_info)
             class_methods[name] = class_info.methods
@@ -161,8 +163,8 @@ def parse_with_profile(filepath: str, source: str, parser, profile: LanguageProf
                 signature=_build_signature(source, node, name, profile.language),
                 is_method=is_method,
                 parent_class=parent,
-                line_start=line_number(node),
-                line_end=line_end(node),
+                line_start=line_number(source, node),
+                line_end=line_end(source, node),
             )
             if is_method and parent and parent in class_methods:
                 class_methods[parent].append(func_info)

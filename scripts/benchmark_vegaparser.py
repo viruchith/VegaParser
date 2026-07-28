@@ -61,7 +61,7 @@ SUITE: list[BenchmarkTarget] = [
     BenchmarkTarget("ruby-heavy", "https://github.com/rails/rails", "heavy", ("ruby",), "Large Ruby web framework"),
     BenchmarkTarget("ruby-light", "https://github.com/sinatra/sinatra", "light", ("ruby",), "Compact Ruby web framework"),
     BenchmarkTarget("php-heavy", "https://github.com/laravel/framework", "heavy", ("php",), "Large PHP framework"),
-    BenchmarkTarget("php-light", "https://github.com/monolog/monolog", "light", ("php",), "Popular PHP logging library"),
+    BenchmarkTarget("php-light", "https://github.com/Seldaek/monolog", "light", ("php",), "Popular PHP logging library"),
     BenchmarkTarget("swift-heavy", "https://github.com/apple/swift", "heavy", ("swift",), "Swift compiler and stdlib"),
     BenchmarkTarget("swift-light", "https://github.com/Alamofire/Alamofire", "light", ("swift",), "Popular Swift networking lib"),
     BenchmarkTarget("yaml-heavy", "https://github.com/kubernetes/kubernetes", "heavy", ("yaml", "kubernetes"), "YAML and K8s manifests"),

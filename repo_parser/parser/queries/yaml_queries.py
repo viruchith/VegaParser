@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from repo_parser.models import ClassInfo, ParsedFile
-from repo_parser.parser.queries.base import iter_nodes, line_number, node_kind, node_text
+from repo_parser.parser.queries.base import child_count, iter_nodes, line_number, node_kind, node_text, parse_root
 
 K8S_KINDS = {
     "Deployment", "Service", "Ingress", "ConfigMap", "Secret", "Pod",
@@ -23,7 +23,7 @@ K8S_KEY_RE = re.compile(
 def _extract_yaml_pairs(source: str, root) -> dict[str, str]:
     pairs: dict[str, str] = {}
     for node in iter_nodes(root, "block_mapping_pair"):
-        children = [node.child(i) for i in range(node.child_count())]
+        children = [node.child(i) for i in range(child_count(node))]
         if len(children) < 2:
             continue
         key = node_text(source, children[0]).strip().strip('"').strip("'")
@@ -38,8 +38,7 @@ def _is_k8s_manifest(pairs: dict[str, str]) -> bool:
 
 
 def parse_yaml(filepath: str, source: str, parser) -> ParsedFile:
-    tree = parser.parse(source)
-    root = tree.root_node()
+    _tree, root = parse_root(parser, source)
 
     parsed = ParsedFile(filepath=filepath, language="yaml")
     pairs = _extract_yaml_pairs(source, root)

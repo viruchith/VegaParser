@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import concurrent.futures
 import logging
-import os
 from pathlib import Path
 from typing import Optional
 
@@ -58,7 +56,6 @@ def _parse_files(
     if cache_payload and cache_payload.get("version") == CACHE_VERSION and cache_payload.get("filter") == build_filter_signature(lang_filter, scanner.extensions):
         cached_files = cache_payload.get("files", {})
 
-    max_workers = min(32, max(4, (os.cpu_count() or 1) * 2))
     def _is_cache_hit(rel_path: Path) -> bool:
         rel_str = rel_path.as_posix()
         cached = cached_files.get(rel_str)
@@ -94,27 +91,20 @@ def _parse_files(
             logger.warning("Failed to parse or unsupported file: %s", rel_str)
         return result
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_map: dict[concurrent.futures.Future, Path] = {}
+    for rel_path in files:
+        rel_str = rel_path.as_posix()
+        progress_update(f"Processing {truncate_filepath(rel_str)}…")
 
-        for rel_path in files:
-            rel_str = rel_path.as_posix()
-            progress_update(f"Processing {truncate_filepath(rel_str)}…")
-
-            if _is_cache_hit(rel_path):
-                logger.debug("Cache hit: %s", rel_str)
-                parsed_files.append(parsed_file_from_dict(cached_files[rel_str]["parsed"]))
-                progress_update(advance=1)
-                continue
-
-            future = executor.submit(_parse_one, rel_path)
-            future_map[future] = rel_path
-
-        for future in concurrent.futures.as_completed(future_map):
-            result = future.result()
-            if result is not None:
-                parsed_files.append(result)
+        if _is_cache_hit(rel_path):
+            logger.debug("Cache hit: %s", rel_str)
+            parsed_files.append(parsed_file_from_dict(cached_files[rel_str]["parsed"]))
             progress_update(advance=1)
+            continue
+
+        result = _parse_one(rel_path)
+        if result is not None:
+            parsed_files.append(result)
+        progress_update(advance=1)
 
     parsed_files.sort(key=lambda p: p.filepath)
     return parsed_files

@@ -3,7 +3,15 @@
 from __future__ import annotations
 
 from repo_parser.models import ClassInfo, FunctionInfo, ParsedFile
-from repo_parser.parser.queries.base import iter_nodes, line_end, line_number, node_kind, node_text
+from repo_parser.parser.queries.base import (
+    child_count,
+    iter_nodes,
+    line_end,
+    line_number,
+    node_kind,
+    node_text,
+    parse_root,
+)
 
 BLOCK_TYPES = {
     "resource", "data", "module", "provider", "variable", "output",
@@ -12,8 +20,7 @@ BLOCK_TYPES = {
 
 
 def parse_hcl(filepath: str, source: str, parser, lang_name: str = "hcl") -> ParsedFile:
-    tree = parser.parse(source)
-    root = tree.root_node()
+    _tree, root = parse_root(parser, source)
 
     parsed = ParsedFile(filepath=filepath, language=lang_name)
 
@@ -22,7 +29,7 @@ def parse_hcl(filepath: str, source: str, parser, lang_name: str = "hcl") -> Par
         block_type = None
         block_name = None
 
-        for i in range(node.child_count()):
+        for i in range(child_count(node)):
             child = node.child(i)
             kind = node_kind(child)
             text = node_text(source, child).strip().strip('"')
@@ -43,16 +50,16 @@ def parse_hcl(filepath: str, source: str, parser, lang_name: str = "hcl") -> Par
             ClassInfo(
                 name=full_name,
                 docstring=f"{block_type} block",
-                line_start=line_number(node),
-                line_end=line_end(node),
+                line_start=line_number(source, node),
+                line_end=line_end(source, node),
             )
         )
         parsed.functions.append(
             FunctionInfo(
                 name=block_type,
                 signature=signature[:200],
-                line_start=line_number(node),
-                line_end=line_end(node),
+                line_start=line_number(source, node),
+                line_end=line_end(source, node),
             )
         )
         parsed.exports.append(full_name)

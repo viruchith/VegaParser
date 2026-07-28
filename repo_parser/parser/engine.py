@@ -13,6 +13,7 @@ from repo_parser.parser.queries.common_queries import PROFILES, parse_common
 from repo_parser.parser.queries.docker_queries import parse_dockerfile
 from repo_parser.parser.queries.env_queries import parse_env
 from repo_parser.parser.queries.hcl_queries import parse_hcl
+from repo_parser.parser.queries.java_fallback_queries import parse_java_fallback
 from repo_parser.parser.queries.javascript_queries import parse_javascript
 from repo_parser.parser.queries.python_queries import parse_python
 from repo_parser.parser.queries.shell_queries import parse_shell
@@ -31,6 +32,7 @@ PARSERS = {
     "python": lambda fp, src, parser: parse_python(fp, src, parser),
     "javascript": lambda fp, src, parser: parse_javascript(fp, src, parser, "javascript"),
     "typescript": lambda fp, src, parser: parse_javascript(fp, src, parser, "typescript"),
+    "java": lambda fp, src, parser: parse_java_fallback(fp, src, parser),
     "dockerfile": lambda fp, src, parser: parse_dockerfile(fp, src, parser),
     "yaml": lambda fp, src, parser: parse_yaml(fp, src, parser),
     "kubernetes": lambda fp, src, parser: parse_yaml(fp, src, parser),
@@ -92,7 +94,7 @@ class ParserEngine:
             return None
 
         # Config-only parsers don't need tree-sitter
-        if lang_name in ("env", "properties", "ini"):
+        if lang_name in ("env", "properties", "ini", "java"):
             try:
                 result = parser_fn(filepath, source, None)
                 return result

@@ -5,7 +5,15 @@ from __future__ import annotations
 import re
 
 from repo_parser.models import ClassInfo, FunctionInfo, ParsedFile
-from repo_parser.parser.queries.base import iter_nodes, line_end, line_number, node_kind, node_text
+from repo_parser.parser.queries.base import (
+    child_count,
+    iter_nodes,
+    line_end,
+    line_number,
+    node_kind,
+    node_text,
+    parse_root,
+)
 
 PLSQL_PATTERNS = [
     (re.compile(r"\bCREATE\s+(OR\s+REPLACE\s+)?PACKAGE\b", re.I), "PACKAGE"),
@@ -67,8 +75,7 @@ def _extract_plsql_objects(source: str, parsed: ParsedFile) -> None:
 
 
 def parse_sql(filepath: str, source: str, parser) -> ParsedFile:
-    tree = parser.parse(source)
-    root = tree.root_node()
+    _tree, root = parse_root(parser, source)
 
     is_plsql = _detect_plsql(source) or filepath.lower().endswith((".plsql", ".pls", ".pkb", ".pks"))
     parsed = ParsedFile(filepath=filepath, language="plsql" if is_plsql else "sql")
@@ -79,7 +86,7 @@ def parse_sql(filepath: str, source: str, parser) -> ParsedFile:
         if kind in SQL_NODE_KINDS:
             text = node_text(source, node).strip()
             label = SQL_NODE_KINDS[kind]
-            key = f"{label}:{line_number(node)}"
+            key = f"{label}:{line_number(source, node)}"
             if key in seen_stmts:
                 continue
             seen_stmts.add(key)
@@ -87,13 +94,13 @@ def parse_sql(filepath: str, source: str, parser) -> ParsedFile:
                 FunctionInfo(
                     name=label,
                     signature=text[:200],
-                    line_start=line_number(node),
-                    line_end=line_end(node),
+                    line_start=line_number(source, node),
+                    line_end=line_end(source, node),
                 )
             )
             parsed.exports.append(label)
         elif kind == "create_table":
-            for child in (node.child(i) for i in range(node.child_count())):
+            for child in (node.child(i) for i in range(child_count(node))):
                 if node_kind(child) in ("identifier", "object_reference", "table_reference"):
                     table = node_text(source, child).strip()
                     if table:
@@ -101,8 +108,8 @@ def parse_sql(filepath: str, source: str, parser) -> ParsedFile:
                             ClassInfo(
                                 name=table,
                                 docstring="Database table",
-                                line_start=line_number(node),
-                                line_end=line_end(node),
+                                line_start=line_number(source, node),
+                                line_end=line_end(source, node),
                             )
                         )
 

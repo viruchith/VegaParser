@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from repo_parser.models import FunctionInfo, ParsedFile
-from repo_parser.parser.queries.base import iter_nodes, line_end, line_number, node_kind, node_text
+from repo_parser.parser.queries.base import iter_nodes, line_end, line_number, node_kind, node_text, parse_root
 
 INSTRUCTION_LABELS = {
     "from_instruction": "FROM",
@@ -27,8 +27,7 @@ INSTRUCTION_LABELS = {
 
 
 def parse_dockerfile(filepath: str, source: str, parser) -> ParsedFile:
-    tree = parser.parse(source)
-    root = tree.root_node()
+    _tree, root = parse_root(parser, source)
 
     parsed = ParsedFile(filepath=filepath, language="dockerfile")
     instructions: list[str] = []
@@ -43,8 +42,8 @@ def parse_dockerfile(filepath: str, source: str, parser) -> ParsedFile:
                 FunctionInfo(
                     name=label,
                     signature=text,
-                    line_start=line_number(node),
-                    line_end=line_end(node),
+                    line_start=line_number(source, node),
+                    line_end=line_end(source, node),
                 )
             )
             parsed.exports.append(label)

@@ -10,7 +10,9 @@ from repo_parser.parser.queries.base import (
     line_end,
     line_number,
     node_kind,
+    node_parent,
     node_text,
+    parse_root,
 )
 from repo_parser.parser.queries.common_queries import (
     PROFILES,
@@ -38,10 +40,9 @@ def parse_java(filepath: str, source: str, parser) -> ParsedFile:
 
     # Re-collect imports at program scope (tree-sitter + regex fallback for reliability)
     parsed.imports.clear()
-    tree = parser.parse(source)
-    root = tree.root_node()
+    _tree, root = parse_root(parser, source)
     for node in iter_nodes(root, "import_declaration"):
-        parent = node.parent()
+        parent = node_parent(node)
         if parent and node_kind(parent) in ("program", "module_declaration", "source_file"):
             text = node_text(source, node).strip()
             if text:
