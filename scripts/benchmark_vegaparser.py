@@ -130,7 +130,14 @@ def ensure_repo(target: BenchmarkTarget, workspace: Path, refresh: bool = False,
 def clear_generated_outputs(repo_path: Path) -> None:
     rag_kb = repo_path / ".rag_kb"
     if rag_kb.exists():
-        shutil.rmtree(rag_kb)
+        try:
+            shutil.rmtree(rag_kb)
+        except OSError:
+            # Python's fd-based rmtree can raise ENOTEMPTY on macOS when the
+            # directory contains entries it couldn't fully clean (e.g. files
+            # whose names were generated before the filename-length fix).
+            # Fall back to the OS rm command which is more resilient.
+            subprocess.run(["rm", "-rf", str(rag_kb)], check=False)
     log_path = repo_path / "repo-parser.log"
     if log_path.exists():
         log_path.unlink()
