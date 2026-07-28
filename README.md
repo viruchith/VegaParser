@@ -27,9 +27,10 @@
 9. [Endpoint & Secret Extraction](#endpoint--secret-extraction)
 10. [Logging](#logging)
 11. [Project Layout](#project-layout)
-12. [Testing](#testing)
-13. [Contributing](#contributing)
-14. [License](#license)
+12. [Benchmarking](#benchmarking)
+13. [Testing](#testing)
+14. [Contributing](#contributing)
+15. [License](#license)
 
 ---
 
@@ -454,16 +455,98 @@ VegaParser/
 
 ## Benchmarking
 
-Run the curated GitHub benchmark suite:
+Use the benchmark runner to measure VegaParser across curated heavy/light open-source repositories per language group.
+
+### Prerequisites
+
+- Python 3.10+
+- `git` available on PATH
+- Enough disk/network capacity for cloned benchmark repos (heavy targets can be very large)
+
+### Quick commands
 
 ```bash
+# Show all benchmark targets (id, tier, languages, repo)
 python scripts/benchmark_vegaparser.py --list
+
+# Run every heavy target once (cold run)
 python scripts/benchmark_vegaparser.py --tier heavy
+
+# Run only Java targets with a warm-cache pass
 python scripts/benchmark_vegaparser.py --language java --warm
+
+# Pin exact targets and average 3 cold runs
+python scripts/benchmark_vegaparser.py \
+  --repo java-heavy --repo java-light \
+  --repeat 3
+
+# Save machine-readable output
 python scripts/benchmark_vegaparser.py --json benchmark-results.json
 ```
 
-Benchmarks clone repos into `~/.cache/vegaparser-benchmarks/` by default and report cold-run timing plus an optional warm-cache pass.
+### Example runs
+
+```bash
+# 1) Full smoke run (all targets, one cold run each)
+python scripts/benchmark_vegaparser.py
+
+# 2) Heavy repos only, force fresh clone to avoid stale state
+python scripts/benchmark_vegaparser.py --tier heavy --refresh
+
+# 3) Java comparison with averaging + warm-cache pass
+python scripts/benchmark_vegaparser.py \
+  --repo java-heavy --repo java-light \
+  --repeat 5 \
+  --warm \
+  --json results/java-benchmark.json
+
+# 4) Language-focused run across multiple families
+python scripts/benchmark_vegaparser.py \
+  --language python \
+  --language javascript \
+  --repeat 3 \
+  --json results/py-js.json
+
+# 5) Run in a custom workspace directory
+python scripts/benchmark_vegaparser.py \
+  --workspace /tmp/vegaparser-bench \
+  --tier light \
+  --json /tmp/vegaparser-bench/light.json
+```
+
+### Common options
+
+| Option | Purpose |
+|---|---|
+| `--tier {heavy,light,all}` | Filter target size profile |
+| `--language <lang>` (repeatable) | Keep targets containing one of the given languages |
+| `--repo <id>` (repeatable) | Run exact benchmark ids from `--list` |
+| `--repeat <n>` | Average `n` cold runs per target |
+| `--warm` | Add one warm-cache run after cold run(s) |
+| `--refresh` | Re-clone repositories before benchmarking |
+| `--workspace <path>` | Custom clone/cache directory (default: `~/.cache/vegaparser-benchmarks`) |
+| `--json <file>` | Export full results as JSON |
+
+### Output columns
+
+- `cold_avg_s`: average of cold-run timings (`--repeat`)
+- `cold_min_s` / `cold_max_s`: spread across cold runs
+- `warm_s`: warm-cache timing (`--warm`) to observe incremental indexing impact
+- `modules`: number of module markdown files generated
+- `status`: `ok`, parse/clone failure, or other error
+
+### Recommended workflow for reliable comparisons
+
+1. Run once with `--refresh --repeat 1` to establish a clean cold baseline.
+2. Run again with `--warm --repeat 3` to compare cold vs warm behavior.
+3. Keep the same machine/load conditions (CPU governor, background jobs, network) across runs.
+4. Track result JSON files over time to compare branches or releases.
+
+### Notes
+
+- By default, repositories are cloned and reused in `~/.cache/vegaparser-benchmarks/`.
+- A single target failing clone/parse does **not** abort the whole suite; status is recorded per target.
+- For quick local checks, prefer a small subset (`--repo` or `--language`) before full heavy runs.
 
 ---
 

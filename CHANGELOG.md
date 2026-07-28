@@ -6,6 +6,19 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+#### Benchmark guide
+- Expanded `README.md` benchmark documentation with:
+  - prerequisites and quick-start commands
+  - a dedicated "Example runs" section (full suite, heavy-only, Java A/B, multi-language, custom workspace)
+  - option reference table and output-column interpretation
+  - recommended workflow for repeatable performance comparisons
+
+---
+
 ## [0.2.0] — 2026-07-16
 
 ### Added
