@@ -32,6 +32,7 @@ class RunResult:
     duration_seconds: float
     returncode: int
     module_count: int
+    stderr_tail: str = ""
 
 
 SUITE: list[BenchmarkTarget] = [
@@ -93,16 +94,24 @@ def repo_exists(path: Path) -> bool:
     return (path / ".git").is_dir()
 
 
-def ensure_repo(target: BenchmarkTarget, workspace: Path, refresh: bool = False) -> Path:
+def ensure_repo(target: BenchmarkTarget, workspace: Path, refresh: bool = False, verbose: bool = False) -> Path:
     path = clone_path(workspace, target)
     if refresh and path.exists():
+        if verbose:
+            print(f"  - removing existing clone: {path}", flush=True)
         shutil.rmtree(path)
     if path.exists() and not repo_exists(path):
+        if verbose:
+            print(f"  - removing partial clone: {path}", flush=True)
         shutil.rmtree(path)
     if repo_exists(path):
+        if verbose:
+            print(f"  - using existing clone: {path}", flush=True)
         return path
 
     path.parent.mkdir(parents=True, exist_ok=True)
+    if verbose:
+        print(f"  - cloning {target.repo} -> {path}", flush=True)
     cmd = [
         "git",
         "clone",
@@ -144,12 +153,25 @@ def run_vegaparser(repo_path: Path, languages: tuple[str, ...]) -> RunResult:
     duration = time.perf_counter() - start
 
     module_count = len(list((repo_path / ".rag_kb" / "modules").glob("*.md")))
-    return RunResult(duration_seconds=duration, returncode=completed.returncode, module_count=module_count)
+    stderr_tail = "\n".join((completed.stderr or "").splitlines()[-8:])
+    return RunResult(
+        duration_seconds=duration,
+        returncode=completed.returncode,
+        module_count=module_count,
+        stderr_tail=stderr_tail,
+    )
 
 
-def run_target(target: BenchmarkTarget, workspace: Path, repeat: int, warm: bool, refresh: bool) -> dict:
+def run_target(
+    target: BenchmarkTarget,
+    workspace: Path,
+    repeat: int,
+    warm: bool,
+    refresh: bool,
+    verbose: bool = False,
+) -> dict:
     try:
-        repo_path = ensure_repo(target, workspace, refresh=refresh)
+        repo_path = ensure_repo(target, workspace, refresh=refresh, verbose=verbose)
     except Exception as exc:
         return {
             "id": target.id,
@@ -171,24 +193,42 @@ def run_target(target: BenchmarkTarget, workspace: Path, repeat: int, warm: bool
     last_rc = 0
     last_error = ""
 
-    for _ in range(repeat):
+    for run_no in range(1, repeat + 1):
+        if verbose:
+            print(f"  - cold run {run_no}/{repeat}", flush=True)
         clear_generated_outputs(repo_path)
         result = run_vegaparser(repo_path, target.languages)
         cold_times.append(result.duration_seconds)
         module_count = result.module_count
         last_rc = result.returncode
+        if verbose:
+            print(
+                f"    completed in {result.duration_seconds:.2f}s (modules={module_count}, rc={last_rc})",
+                flush=True,
+            )
         if last_rc != 0:
             last_error = "cold run failed"
+            if result.stderr_tail:
+                print(result.stderr_tail, file=sys.stderr, flush=True)
             break
 
     warm_seconds = None
     if warm and last_rc == 0:
+        if verbose:
+            print("  - warm run", flush=True)
         result = run_vegaparser(repo_path, target.languages)
         warm_seconds = result.duration_seconds
         module_count = result.module_count
         last_rc = result.returncode
+        if verbose:
+            print(
+                f"    completed in {result.duration_seconds:.2f}s (modules={module_count}, rc={last_rc})",
+                flush=True,
+            )
         if last_rc != 0:
             last_error = "warm run failed"
+            if result.stderr_tail:
+                print(result.stderr_tail, file=sys.stderr, flush=True)
 
     return {
         "id": target.id,
@@ -210,6 +250,11 @@ def format_seconds(value: float | None) -> str:
     if value is None:
         return "-"
     return f"{value:.2f}"
+
+
+def format_seconds_with_unit(value: float | None) -> str:
+    formatted = format_seconds(value)
+    return formatted if formatted == "-" else f"{formatted}s"
 
 
 def short_text(value: str, limit: int = 80) -> str:
@@ -260,6 +305,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--refresh", action="store_true", help="Reclone benchmark repositories before running.")
     parser.add_argument("--list", action="store_true", help="List the benchmark suite and exit.")
     parser.add_argument("--json", dest="json_path", type=Path, help="Write benchmark results as JSON.")
+    parser.add_argument("--verbose", action="store_true", help="Print detailed per-step progress logs.")
     return parser.parse_args()
 
 
@@ -287,7 +333,29 @@ def main() -> int:
         return 2
 
     args.workspace.mkdir(parents=True, exist_ok=True)
-    results = [run_target(target, args.workspace, max(1, args.repeat), args.warm, args.refresh) for target in selected]
+    total = len(selected)
+    print(
+        f"Running {total} benchmark target(s) (repeat={max(1, args.repeat)}, warm={args.warm}, refresh={args.refresh})",
+        flush=True,
+    )
+    results: list[dict] = []
+    for idx, target in enumerate(selected, start=1):
+        print(f"[{idx}/{total}] {target.id} ({target.tier})", flush=True)
+        result = run_target(
+            target,
+            args.workspace,
+            max(1, args.repeat),
+            args.warm,
+            args.refresh,
+            verbose=args.verbose,
+        )
+        results.append(result)
+        print(
+            f"  -> {result['status']} | cold_avg={format_seconds_with_unit(result['cold_avg_s'])} | warm={format_seconds_with_unit(result['warm_s'])} | modules={result['modules']}",
+            flush=True,
+        )
+
+    print("\nSummary", flush=True)
     print_table(results)
 
     if args.json_path:

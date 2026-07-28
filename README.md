@@ -475,6 +475,9 @@ python scripts/benchmark_vegaparser.py --tier heavy
 # Run only Java targets with a warm-cache pass
 python scripts/benchmark_vegaparser.py --language java --warm
 
+# Show detailed live logs for each clone/run step
+python scripts/benchmark_vegaparser.py --tier light --verbose
+
 # Pin exact targets and average 3 cold runs
 python scripts/benchmark_vegaparser.py \
   --repo java-heavy --repo java-light \
@@ -526,6 +529,7 @@ python scripts/benchmark_vegaparser.py \
 | `--refresh` | Re-clone repositories before benchmarking |
 | `--workspace <path>` | Custom clone/cache directory (default: `~/.cache/vegaparser-benchmarks`) |
 | `--json <file>` | Export full results as JSON |
+| `--verbose` | Print detailed step-by-step progress logs during clone and runs |
 
 ### Output columns
 

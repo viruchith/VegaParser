@@ -17,6 +17,13 @@ Versions follow [Semantic Versioning](https://semver.org/).
   - option reference table and output-column interpretation
   - recommended workflow for repeatable performance comparisons
 
+#### Benchmark runner UX
+- Updated `scripts/benchmark_vegaparser.py` to print live progress by default:
+  - run banner with selected target count and options
+  - per-target progress (`[i/N]`) and completion summaries
+  - final summary table
+- Added `--verbose` for detailed step logs (clone/cache actions, per-run timings, and failure stderr tail).
+
 ---
 
 ## [0.2.0] — 2026-07-16
