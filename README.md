@@ -531,13 +531,49 @@ python scripts/benchmark_vegaparser.py \
 | `--json <file>` | Export full results as JSON |
 | `--verbose` | Print detailed step-by-step progress logs during clone and runs |
 
+### Cold vs warm runs
+
+VegaParser has a file-level incremental cache (`parse_cache.json` inside `.rag_kb/`).
+Each cache entry stores the file's `mtime_ns` and `size`.
+On re-index, if those values match, the tree-sitter parse step is skipped entirely and
+the cached `ParsedFile` record is reused — only markdown generation runs.
+
+The benchmark exploits this to measure two distinct performance profiles:
+
+| Mode | What happens | When `.rag_kb` exists? | Measures |
+|---|---|---|---|
+| **Cold** | `.rag_kb` deleted before every run | No | Full parse: file I/O + tree-sitter + markdown write |
+| **Warm** | `.rag_kb` kept from the cold run | Yes (all cache hits) | Incremental reindex: cache load + markdown write only |
+
+**Enabling a warm pass:**
+
+```bash
+# Run cold once, then warm once, for all Java targets
+python scripts/benchmark_vegaparser.py --language java --warm --verbose
+
+# Average 3 cold runs and follow with a warm pass, save to JSON
+python scripts/benchmark_vegaparser.py \
+  --repo kotlin-heavy \
+  --repeat 3 \
+  --warm \
+  --json results/kotlin-cold-vs-warm.json
+```
+
+**What to expect:**
+On an unchanged repo (the benchmark case), warm times are dramatically lower than cold.
+For example, a `kotlin-heavy` cold run of ~50 s typically drops to ~2–5 s warm, because
+all 67 000+ modules are cache hits and tree-sitter is never invoked.
+The `warm_s` column in the result table and JSON captures this timing.
+
+> **Note:** `warm_s` is `null` / `-` when `--warm` is not passed.
+
 ### Output columns
 
 - `cold_avg_s`: average of cold-run timings (`--repeat`)
-- `cold_min_s` / `cold_max_s`: spread across cold runs
-- `warm_s`: warm-cache timing (`--warm`) to observe incremental indexing impact
+- `cold_min_s` / `cold_max_s`: spread across cold runs (only meaningful when `--repeat` > 1)
+- `warm_s`: warm-cache timing (`--warm`) — `null` when not requested
 - `modules`: number of module markdown files generated
-- `status`: `ok`, parse/clone failure, or other error
+- `status`: `ok`, clone failure, parse failure, or other error
 
 ### Recommended workflow for reliable comparisons
 
