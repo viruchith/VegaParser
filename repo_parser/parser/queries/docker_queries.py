@@ -48,14 +48,12 @@ def parse_dockerfile(filepath: str, source: str, parser) -> ParsedFile:
                 )
             )
             parsed.exports.append(label)
+        elif kind == "from_instruction":
+            parsed.imports.append(node_text(source, node).strip())
+        elif kind == "expose_instruction":
+            parsed.exports.append(node_text(source, node).strip())
 
     if instructions:
         parsed.module_docstring = "Dockerfile build instructions:\n" + "\n".join(instructions[:20])
-
-    # Detect base images and exposed ports for imports/exports metadata
-    for node in iter_nodes(root, "from_instruction"):
-        parsed.imports.append(node_text(source, node).strip())
-    for node in iter_nodes(root, "expose_instruction"):
-        parsed.exports.append(node_text(source, node).strip())
 
     return parsed

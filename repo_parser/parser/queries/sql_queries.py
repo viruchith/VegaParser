@@ -92,16 +92,19 @@ def parse_sql(filepath: str, source: str, parser) -> ParsedFile:
                 )
             )
             parsed.exports.append(label)
-
-    # Extract table names from CREATE TABLE
-    for node in iter_nodes(root, "create_table"):
-        for child in (node.child(i) for i in range(node.child_count())):
-            if node_kind(child) in ("identifier", "object_reference", "table_reference"):
-                table = node_text(source, child).strip()
-                if table:
-                    parsed.classes.append(
-                        ClassInfo(name=table, docstring="Database table", line_start=line_number(node), line_end=line_end(node))
-                    )
+        elif kind == "create_table":
+            for child in (node.child(i) for i in range(node.child_count())):
+                if node_kind(child) in ("identifier", "object_reference", "table_reference"):
+                    table = node_text(source, child).strip()
+                    if table:
+                        parsed.classes.append(
+                            ClassInfo(
+                                name=table,
+                                docstring="Database table",
+                                line_start=line_number(node),
+                                line_end=line_end(node),
+                            )
+                        )
 
     if is_plsql:
         _extract_plsql_objects(source, parsed)

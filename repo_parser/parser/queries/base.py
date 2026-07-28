@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from functools import lru_cache
+
+
+@lru_cache(maxsize=4)
+def _encode(source: str) -> bytes:
+    return source.encode("utf-8")
 
 
 def node_text(source: str, node) -> str:
     if node is None:
         return ""
-    source_bytes = source.encode("utf-8")
+    # A single file's source is re-encoded on every node lookup (imports,
+    # classes, functions, calls, ...). Caching by source avoids O(file size)
+    # work per call; str hashing is cheap here since CPython caches the hash
+    # of a str object after it's first computed.
+    source_bytes = _encode(source)
     byte_range = node.byte_range()
     return source_bytes[byte_range.start : byte_range.end].decode("utf-8", errors="replace")
 
@@ -19,10 +29,13 @@ def node_kind(node) -> str:
 
 def iter_nodes(node, kind: str | None = None) -> Iterator:
     """Depth-first traversal, optionally filtering by node kind."""
-    if kind is None or node_kind(node) == kind:
-        yield node
-    for i in range(node.child_count()):
-        yield from iter_nodes(node.child(i), kind)
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if kind is None or node_kind(current) == kind:
+            yield current
+        for i in range(current.child_count() - 1, -1, -1):
+            stack.append(current.child(i))
 
 
 def find_child_by_kind(node, kind: str):

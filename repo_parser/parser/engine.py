@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from threading import local
 
 from tree_sitter_language_pack import get_parser, has_language
 
@@ -52,10 +53,15 @@ class ParserEngine:
     """Parse source files using tree-sitter."""
 
     def __init__(self) -> None:
-        self._parser_cache: dict[str, object] = {}
+        self._thread_local = local()
 
     def _get_parser(self, lang_name: str):
-        if lang_name not in self._parser_cache:
+        cache = getattr(self._thread_local, "parser_cache", None)
+        if cache is None:
+            cache = {}
+            self._thread_local.parser_cache = cache
+
+        if lang_name not in cache:
             grammar = lang_name
             if lang_name == "kubernetes":
                 grammar = "yaml"
@@ -69,11 +75,11 @@ class ParserEngine:
                 logger.warning("Tree-sitter grammar not available for: %s", grammar)
                 return None
             try:
-                self._parser_cache[lang_name] = get_parser(grammar)
+                cache[lang_name] = get_parser(grammar)
             except Exception as exc:
                 logger.warning("Could not load tree-sitter parser for %s: %s", grammar, exc)
                 return None
-        return self._parser_cache[lang_name]
+        return cache[lang_name]
 
     def parse_file(self, filepath: str, source: str) -> ParsedFile | None:
         lang_name = detect_language(filepath)

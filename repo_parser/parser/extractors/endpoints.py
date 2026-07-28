@@ -205,10 +205,15 @@ def extract_endpoints(source: str) -> tuple[list[ExternalUrl], list[DatabaseEndp
 
     for line_no, line in enumerate(lines, 1):
         context = line.strip()[:160]
+        stripped = line.strip()
+        has_conn_signal = "://" in line or "=" in line or ":" in line or "{" in line or "}" in line
+
+        if not has_conn_signal and "http" not in line.lower() and "db_" not in line.lower() and "host" not in line.lower():
+            continue
 
         # Environment variables
         env_handled = False
-        env_match = ENV_VAR_LINE.match(line.strip())
+        env_match = ENV_VAR_LINE.match(stripped)
         if env_match:
             var_name = env_match.group(1).upper()
             var_value = env_match.group(2).strip().strip("'\"").strip()
@@ -286,40 +291,43 @@ def extract_endpoints(source: str) -> tuple[list[ExternalUrl], list[DatabaseEndp
                     db_endpoints.append(kv_ep)
 
         # Connection URIs in line
-        for pattern in (CONN_URI_PATTERN, JDBC_PATTERN):
-            for match in pattern.finditer(line):
-                ep = _parse_uri(match.group(0), line_no, context)
+        if "://" in line or "jdbc:" in line.lower():
+            for pattern in (CONN_URI_PATTERN, JDBC_PATTERN):
+                for match in pattern.finditer(line):
+                    ep = _parse_uri(match.group(0), line_no, context)
+                    if ep:
+                        key = (ep.host, ep.user, ep.database, ep.port, line_no)
+                        if key not in seen_db:
+                            seen_db.add(key)
+                            db_endpoints.append(ep)
+
+        # SQLAlchemy / driver connection strings
+        if "create_engine" in line or "connect(" in line or "createConnection" in line:
+            for match in ENGINE_STRING_PATTERN.finditer(line):
+                ep = _parse_uri(match.group(1), line_no, context)
                 if ep:
                     key = (ep.host, ep.user, ep.database, ep.port, line_no)
                     if key not in seen_db:
                         seen_db.add(key)
                         db_endpoints.append(ep)
 
-        # SQLAlchemy / driver connection strings
-        for match in ENGINE_STRING_PATTERN.finditer(line):
-            ep = _parse_uri(match.group(1), line_no, context)
-            if ep:
-                key = (ep.host, ep.user, ep.database, ep.port, line_no)
-                if key not in seen_db:
-                    seen_db.add(key)
-                    db_endpoints.append(ep)
-
         # External URLs
-        for match in URL_PATTERN.finditer(line):
-            url = match.group(0).rstrip(".,;)")
-            # Skip DB URIs already captured
-            if CONN_URI_PATTERN.match(url):
-                continue
-            try:
-                host = urlparse(url).hostname or ""
-            except Exception:
-                host = ""
-            if host in SKIP_URL_HOSTS:
-                continue
-            key = (url, line_no)
-            if key not in seen_urls:
-                seen_urls.add(key)
-                urls.append(ExternalUrl(url=url, line=line_no, context=context))
+        if "http" in line.lower() or "ftp://" in line.lower() or "wss://" in line.lower():
+            for match in URL_PATTERN.finditer(line):
+                url = match.group(0).rstrip(".,;)")
+                # Skip DB URIs already captured
+                if CONN_URI_PATTERN.match(url):
+                    continue
+                try:
+                    host = urlparse(url).hostname or ""
+                except Exception:
+                    host = ""
+                if host in SKIP_URL_HOSTS:
+                    continue
+                key = (url, line_no)
+                if key not in seen_urls:
+                    seen_urls.add(key)
+                    urls.append(ExternalUrl(url=url, line=line_no, context=context))
 
     return urls, db_endpoints
 

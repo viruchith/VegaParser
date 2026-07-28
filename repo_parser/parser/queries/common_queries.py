@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from repo_parser.models import ClassInfo, FunctionInfo, ParsedFile
 from repo_parser.parser.queries.base import (
@@ -12,7 +12,6 @@ from repo_parser.parser.queries.base import (
     line_number,
     node_kind,
     node_text,
-    strip_docstring_quotes,
 )
 
 NAME_FIELDS = ("name", "declarator", "identifier")
@@ -123,57 +122,53 @@ def parse_with_profile(filepath: str, source: str, parser, profile: LanguageProf
         module_docstring=_extract_leading_comments(root, source, profile.comment_kinds),
     )
 
+    class_methods: dict[str, list[FunctionInfo]] = {}
+    all_class_kinds = profile.class_kinds + profile.struct_kinds
+    func_kinds = set(profile.function_kinds + profile.method_kinds)
+
     for node in iter_nodes(root):
         kind = node_kind(node)
         if kind in profile.import_kinds and _is_module_level(node, profile.module_kinds):
             text = node_text(source, node).strip()
             if text:
                 parsed.imports.append(text)
+            continue
 
-    class_methods: dict[str, list[FunctionInfo]] = {}
-
-    all_class_kinds = profile.class_kinds + profile.struct_kinds
-    for node in iter_nodes(root):
-        kind = node_kind(node)
-        if kind not in all_class_kinds:
-            continue
-        name = _get_name(source, node)
-        if not name:
-            continue
-        class_info = ClassInfo(
-            name=name,
-            line_start=line_number(node),
-            line_end=line_end(node),
-        )
-        parsed.classes.append(class_info)
-        class_methods[name] = class_info.methods
-        parsed.exports.append(name)
-
-    func_kinds = set(profile.function_kinds + profile.method_kinds)
-    for node in iter_nodes(root):
-        kind = node_kind(node)
-        if kind not in func_kinds:
-            continue
-        if profile.skip_nested_functions and kind in profile.function_kinds and _is_nested_function(node):
-            continue
-        name = _get_name(source, node)
-        if not name:
-            continue
-        is_method = kind in profile.method_kinds or _parent_class(source, node) is not None
-        parent = _parent_class(source, node)
-        func_info = FunctionInfo(
-            name=name,
-            signature=_build_signature(source, node, name, profile.language),
-            is_method=is_method,
-            parent_class=parent,
-            line_start=line_number(node),
-            line_end=line_end(node),
-        )
-        if is_method and parent and parent in class_methods:
-            class_methods[parent].append(func_info)
-        else:
-            parsed.functions.append(func_info)
+        if kind in all_class_kinds:
+            name = _get_name(source, node)
+            if not name:
+                continue
+            class_info = ClassInfo(
+                name=name,
+                line_start=line_number(node),
+                line_end=line_end(node),
+            )
+            parsed.classes.append(class_info)
+            class_methods[name] = class_info.methods
             parsed.exports.append(name)
+            continue
+
+        if kind in func_kinds:
+            if profile.skip_nested_functions and kind in profile.function_kinds and _is_nested_function(node):
+                continue
+            name = _get_name(source, node)
+            if not name:
+                continue
+            parent = _parent_class(source, node)
+            is_method = kind in profile.method_kinds or parent is not None
+            func_info = FunctionInfo(
+                name=name,
+                signature=_build_signature(source, node, name, profile.language),
+                is_method=is_method,
+                parent_class=parent,
+                line_start=line_number(node),
+                line_end=line_end(node),
+            )
+            if is_method and parent and parent in class_methods:
+                class_methods[parent].append(func_info)
+            else:
+                parsed.functions.append(func_info)
+                parsed.exports.append(name)
 
     return parsed
 
