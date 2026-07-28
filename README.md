@@ -2,147 +2,459 @@
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Typer](https://img.shields.io/badge/CLI-Typer-00b4ab.svg)](https://typer.tiangolo.com/)
-[![Rich](https://img.shields.io/badge/UX-Rich-fee715.svg)](https://rich.readthedocs.io/)
+[![CI](https://github.com/viruchith/VegaParser/actions/workflows/ci.yml/badge.svg)](https://github.com/viruchith/VegaParser/actions/workflows/ci.yml)
+[![Coverage: 89%](https://img.shields.io/badge/coverage-89%25-brightgreen.svg)](#testing)
 
-**VegaParser** is a Python CLI for **codebase indexing** and **RAG** (Retrieval-Augmented Generation). It turns any local repository into a structured **knowledge base** for **Large Language Models** using **Tree-sitter AST parsing**, then emits LLM-ready **Markdown** for **context injection** into models with massive context windows.
+**VegaParser** is a command-line tool that turns any local code repository into a structured **Markdown knowledge base** optimised for Large Language Models. It walks your source tree, parses every file with **Tree-sitter AST analysis**, enriches results with regex-based endpoint and secret extraction, and writes clean, YAML-frontmatted Markdown that can be injected directly into an LLM's context window.
 
-Index Python, Go, Rust, Kubernetes YAML, SQL, Dockerfiles, and 20+ more languages — complete with imports, signatures, docstrings, external URLs, and database endpoints.
+> **v0.2.0** — incremental caching, hardened secret redaction, 155-test suite (89 % coverage).
+> See [CHANGELOG.md](CHANGELOG.md) for the full release history.
+
+---
+
+## Table of Contents
+
+1. [Features](#features)
+2. [How It Works](#how-it-works)
+3. [Supported Languages](#supported-languages)
+4. [Installation](#installation)
+5. [Quick Start](#quick-start)
+6. [Command Reference](#command-reference)
+   - [init](#init--build-the-knowledge-base)
+   - [bundle](#bundle--create-an-llm-context-file)
+7. [Output Structure](#output-structure)
+8. [Incremental Caching](#incremental-caching)
+9. [Endpoint & Secret Extraction](#endpoint--secret-extraction)
+10. [Logging](#logging)
+11. [Project Layout](#project-layout)
+12. [Testing](#testing)
+13. [Contributing](#contributing)
+14. [License](#license)
+
+---
 
 ## Features
 
-- **Tree-sitter AST parsing** — semantic extraction across 20+ languages (Python, JS/TS, Go, Rust, Java, C#, SQL, …)
-- **RAG-optimized Markdown** — per-module docs with YAML frontmatter in `.rag_kb/modules/`
-- **Knowledge base index** — global project map with tech stack, dependency graph, URLs, and DB endpoints
-- **Context injection bundle** — `bundle` command merges everything into `full_repo_context.md`
-- **Endpoint discovery** — external URLs, connection strings, `.env` variables, host/user/schema metadata
-- **Infrastructure-aware** — Dockerfile, Kubernetes manifests, Terraform/HCL, PL/SQL heuristics
-- **Smart traversal** — respects `.gitignore`, skips binaries and `node_modules`
-- **Rich progress UI** — spinner + progress bar; logs go to `repo-parser.log` (never breaks the terminal)
-- **Verbose file logging** — `--verbose` captures DEBUG-level AST and skip details in `repo-parser.log`
+| Feature | Details |
+|---------|---------|
+| **Tree-sitter AST parsing** | Semantic extraction — imports, classes, methods, docstrings, signatures — across 20+ languages |
+| **RAG-optimised Markdown** | Per-module `.md` files with YAML frontmatter; ready for vector store ingestion or direct injection |
+| **Project-wide index** | `project_index.md` aggregates tech stack, dependency graph, all external URLs, and DB endpoints |
+| **LLM context bundle** | `bundle` command concatenates everything into a single `full_repo_context.md` with size/token estimates |
+| **Endpoint discovery** | Detects HTTP URLs, connection URIs, `.env` variables, JDBC strings, `create_engine()` calls, KV config |
+| **Secret redaction** | Passwords in connection strings are replaced with `***` before writing to any output file |
+| **Incremental caching** | SHA-256 manifest skips unchanged files on re-runs; stale module files are automatically removed |
+| **Infrastructure-aware** | Dockerfile, Kubernetes manifests, Terraform/HCL, PL/SQL heuristics |
+| **Smart traversal** | Respects `.gitignore`, skips hidden dirs, `node_modules`, binaries, and the `.rag_kb/` output dir itself |
+| **Rich progress UI** | Spinner + progress bar; all logs written to `repo-parser.log`, never to stdout |
 
-## Changelog
-
-### 0.1.1
-
-- Faster large-repo indexing through directory pruning, parallel parsing, incremental cache reuse, and reduced AST passes.
-- Added a benchmark script for popular open-source repositories across supported language groups.
-
-## Installation
-
-```bash
-git clone https://github.com/your-org/vegaparser.git
-cd vegaparser
-
-python -m venv .venv
-
-# Windows
-.\.venv\Scripts\activate
-
-# macOS / Linux
-source .venv/bin/activate
-
-pip install -r requirements.txt
-```
-
-Editable install with console script:
-
-```bash
-pip install -e .
-repo-parser --help
-```
-
-**Requirements:** Python 3.10+
-
-## Usage
-
-### Index a repository (`init`)
-
-Build the `.rag_kb/` knowledge base from the current directory:
-
-```bash
-python main.py init
-python main.py init /path/to/your/project
-python main.py init -l python,go,kubernetes --verbose
-```
-
-| Flag | Description |
-|------|-------------|
-| `PATH` | Repository root (default: `.`) |
-| `-l`, `--languages` | Filter languages (e.g. `python,javascript,terraform`) |
-| `-v`, `--verbose` | DEBUG logging to `repo-parser.log` |
-
-### Bundle for LLM context injection (`bundle`)
-
-Concatenate the knowledge base into one file for full-repo **context injection**:
-
-```bash
-python main.py init          # generate .rag_kb/ first
-python main.py bundle        # → .rag_kb/full_repo_context.md
-python main.py bundle -o my_context.md -v
-```
-
-The bundle places `project_index.md` first, then all module files with clear delimiters. The CLI reports file size, word count, and estimated tokens.
-
-### Logging
-
-All runtime logs are written to **`repo-parser.log`** in the current working directory. Nothing is printed to stdout during parsing (protecting the Rich progress bar). Use `--verbose` for detailed DEBUG output including skipped files and AST parse results.
+---
 
 ## How It Works
 
 ```
-Repository  →  Scanner (.gitignore)  →  Tree-sitter AST  →  Endpoint extractor
-                    ↓                        ↓                      ↓
-              .rag_kb/modules/*.md    classes, functions    URLs, DB hosts
-                    ↓
-              .rag_kb/project_index.md  (global map)
-                    ↓
-              .rag_kb/full_repo_context.md  (bundle command)
+┌─────────────────────────────────────────────────────────────────────┐
+│  Repository root                                                    │
+│                                                                     │
+│  RepositoryScanner                                                  │
+│    • loads .gitignore via pathspec                                  │
+│    • skips hidden dirs, binaries, .rag_kb/                          │
+│    • filters by --languages if supplied                             │
+│         │                                                           │
+│         ▼  list[Path]                                               │
+│  ParserEngine.parse_file(path, content)                             │
+│    • detects language via registry                                  │
+│    • dispatches to language-specific extractor                      │
+│    • runs enrich_parsed_file() — URL & DB regex scan                │
+│    • returns ParsedFile dataclass                                   │
+│         │                                                           │
+│         ▼  list[ParsedFile]                                         │
+│  IndexCache (incremental)                                           │
+│    • SHA-256 hash per file → .rag_kb/.cache/manifest.json           │
+│    • unchanged files: restore ParsedFile from cache, skip parse     │
+│         │                                                           │
+│         ▼                                                           │
+│  ParserEngine.infer_internal_dependencies()                         │
+│    • links imports to internal module paths                         │
+│         │                                                           │
+│         ▼                                                           │
+│  MarkdownGenerator.generate()                                       │
+│    • Jinja2: module.md.j2  → .rag_kb/modules/<name>.md             │
+│    • Jinja2: project_index.md.j2 → .rag_kb/project_index.md        │
+│         │                                                           │
+│         ▼  (optional)                                               │
+│  bundle_knowledge_base()                                            │
+│    • project_index.md first, then modules/ alphabetically           │
+│    • → .rag_kb/full_repo_context.md                                 │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-1. **Discovery** — `pathspec` walks the repo, applies `.gitignore`, and filters to known languages.
-2. **AST parsing** — Tree-sitter extracts imports, classes, functions, docstrings, and SDK call patterns per language.
-3. **Endpoint enrichment** — regex scan finds URLs, `DATABASE_URL`, JDBC strings, and config key-values (passwords redacted).
-4. **Markdown generation** — Jinja2 templates produce structured module docs and a project index.
-5. **Bundling** — optional single-file output ordered for LLM attention (index first, then modules).
+---
 
 ## Supported Languages
 
-| Category | Languages | Files |
-|----------|-----------|-------|
-| General purpose | Python, JavaScript, TypeScript, Go, Rust, Java, Kotlin, Scala, C#, Ruby, PHP, Swift, C/C++ | `*.py`, `*.js`, `*.go`, … |
-| Infrastructure | Dockerfile, Kubernetes, Terraform/HCL | `Dockerfile`, `*.yaml`, `*.tf` |
-| Database | SQL, PL/SQL | `*.sql`, `*.plsql` |
-| Config | Environment files | `.env`, `*.properties`, `*.ini` |
-| Shell | Bash | `*.sh`, `Makefile` |
+| Category | Languages | Recognised files |
+|----------|-----------|-----------------|
+| **General purpose** | Python, JavaScript, TypeScript, Go, Rust, Java, Kotlin, Scala, C#, Ruby, PHP, Swift, C, C++ | `*.py` `*.js` `*.ts` `*.go` `*.rs` `*.java` `*.kt` `*.scala` `*.cs` `*.rb` `*.php` `*.swift` `*.c` `*.cpp` `*.h` `*.hpp` |
+| **Infrastructure** | Dockerfile, Kubernetes YAML, Terraform, HCL | `Dockerfile` `Containerfile` `*.yaml` `*.yml` `*.tf` `*.tfvars` `*.hcl` |
+| **Database** | SQL, PL/SQL | `*.sql` `*.plsql` `*.pls` `*.pkb` `*.pks` |
+| **Config / Env** | Environment files, Properties, INI | `.env` `.env.*` `*.properties` `*.ini` `*.cfg` |
+| **Shell** | Bash, Makefile | `*.sh` `*.bash` `*.zsh` `Makefile` |
+
+Language aliases accepted by `--languages`: `py`, `js`, `ts`, `golang`, `rs`, `k8s`, `kubernetes`, `docker`, `dockerfile`, `tf`, `terraform`, `shell`, `env`, `plsql`, …
+
+---
+
+## Installation
+
+### From source (recommended)
+
+```bash
+git clone https://github.com/viruchith/VegaParser.git
+cd VegaParser
+
+# Create and activate a virtual environment
+python -m venv .venv
+
+# macOS / Linux
+source .venv/bin/activate
+
+# Windows (PowerShell)
+.\.venv\Scripts\Activate.ps1
+
+# Install runtime dependencies
+pip install -r requirements.txt
+
+# Install as an editable package (gives you the `repo-parser` console script)
+pip install -e .
+```
+
+### Verify the installation
+
+```bash
+repo-parser --help
+repo-parser init --help
+```
+
+**Requirements:** Python 3.10 or newer. No system-level packages needed — Tree-sitter grammars are bundled via `tree-sitter-language-pack`.
+
+---
+
+## Quick Start
+
+```bash
+# 1. Index any repository
+repo-parser init /path/to/my-project
+
+# 2. Bundle the knowledge base into a single LLM context file
+repo-parser bundle /path/to/my-project
+
+# 3. Feed it to your LLM
+cat /path/to/my-project/.rag_kb/full_repo_context.md | pbcopy   # macOS clipboard
+```
+
+### Self-index VegaParser
+
+```bash
+cd VegaParser
+repo-parser init --verbose          # parse the repo itself
+repo-parser bundle                  # merge into full_repo_context.md
+cat .rag_kb/project_index.md        # inspect the global index
+```
+
+---
+
+## Command Reference
+
+### `init` — Build the knowledge base
+
+```
+repo-parser init [PATH] [OPTIONS]
+```
+
+Scans `PATH` (default: current directory), parses every supported source file, and writes the knowledge base to `<PATH>/.rag_kb/`.
+
+| Argument / Option | Short | Type | Default | Description |
+|-------------------|-------|------|---------|-------------|
+| `PATH` | — | directory | `.` | Repository root to index |
+| `--languages` | `-l` | string | all | Comma-separated language filter, e.g. `python,go,kubernetes` |
+| `--verbose` | `-v` | flag | off | Write DEBUG-level details to `repo-parser.log` |
+| `--log-target` | — | `file\\|console\\|both` | `file` | Choose where logs are written |
+| `--force` / `--no-cache` | — | flag | off | Bypass the incremental cache; reparse every file from scratch |
+
+**Examples:**
+
+```bash
+# Index everything
+repo-parser init
+
+# Index a specific path, Python and Kubernetes only
+repo-parser init ~/projects/api-server -l python,kubernetes
+
+# Force a full re-index, verbose logging
+repo-parser init . --force --verbose
+
+# Index with shorthand aliases
+repo-parser init . -l py,go,docker,tf
+```
+
+**Output on success:**
+
+```
+Generated knowledge base with 42 modules (38 parsed, 4 from cache).
+Project index: /your/project/.rag_kb/project_index.md
+Log file: /your/project/repo-parser.log
+```
+
+---
+
+### `bundle` — Create an LLM context file
+
+```
+repo-parser bundle [PATH] [OPTIONS]
+```
+
+Concatenates all files in `.rag_kb/` into a single `full_repo_context.md` ordered for LLM attention: `project_index.md` first, then module files alphabetically.
+
+| Argument / Option | Short | Type | Default | Description |
+|-------------------|-------|------|---------|-------------|
+| `PATH` | — | directory | `.` | Repository root (must contain `.rag_kb/`) |
+| `--output` | `-o` | string | `full_repo_context.md` | Output filename inside `.rag_kb/` |
+| `--verbose` | `-v` | flag | off | Write DEBUG-level details to `repo-parser.log` |
+| `--log-target` | — | `file\\|console\\|both` | `file` | Choose where logs are written |
+
+**Examples:**
+
+```bash
+# Default bundle
+repo-parser bundle
+
+# Custom output name
+repo-parser bundle -o context_for_gpt.md
+
+# Bundle a different project
+repo-parser bundle ~/projects/api-server
+```
+
+**Output on success:**
+
+```
+Bundle created successfully.
+  Output:      /your/project/.rag_kb/full_repo_context.md
+  Size:        284.3 KB (291,145 bytes)
+  Characters:  291,059
+  Words:       42,318
+  ~Tokens:     72,764 (rough estimate, ~4 chars/token)
+  Log file:    /your/project/repo-parser.log
+
+Warning: This file is intended for LLMs with large context windows.
+```
+
+> **Tip:** Run `init` before `bundle`. `bundle` raises an error if `.rag_kb/` does not exist.
+
+---
+
+## Output Structure
+
+After `init`, the following tree is created inside your repository:
+
+```
+.rag_kb/
+├── project_index.md          ← global project map (tech stack, URLs, DB endpoints)
+├── modules/
+│   ├── src_app_py.md          ← one file per source module
+│   ├── src_db_models_py.md
+│   ├── Dockerfile.md
+│   └── …
+├── .cache/
+│   └── manifest.json         ← incremental cache (SHA-256 hashes + serialised ParsedFile)
+└── full_repo_context.md      ← created by `bundle`
+```
+
+### Module file anatomy (`modules/*.md`)
+
+Each module file has a **YAML frontmatter block** followed by Markdown sections:
+
+```yaml
+---
+filepath: src/app.py
+language: python
+imports:
+  - "import os"
+  - "from flask import Flask"
+exports:
+  - "create_app"
+  - "AppConfig"
+external_urls:
+  - url: "https://api.stripe.com/v1"
+    line: 14
+database_endpoints:
+  - type: "postgres"
+    host: "db.internal"
+    port: "5432"
+    user: "app_user"
+    schema: "public"
+    database: "myapp"
+    line: 22
+---
+
+# File: `src/app.py`
+
+## Overview
+Flask application factory.
+
+## Imports
+- `import os`
+- `from flask import Flask`
+
+## Classes
+### `AppConfig`
+…
+
+## Functions
+### `create_app`
+```def create_app(env: str = "production") -> Flask```
+…
+
+## Database & Connection Endpoints
+| Type     | Host        | Port | User     | Database |
+|----------|-------------|------|----------|----------|
+| postgres | db.internal | 5432 | app_user | myapp    |
+```
+
+### Project index (`project_index.md`)
+
+Aggregates across all parsed files:
+- **Tech stack** — Python packages, Node.js deps, Go modules, Rust crates
+- **Files by language** — counts per language
+- **Module dependency graph** — detected `import` links between internal modules
+- **External URLs (project-wide)** — deduplicated, with source file and line
+- **Database endpoints (project-wide)** — all connection details, source-referenced
+- **File index table** — filepath, language, class count, function count, link to module doc
+
+---
+
+## Incremental Caching
+
+By default, `init` maintains a SHA-256 content-hash manifest at `.rag_kb/.cache/manifest.json`. On subsequent runs:
+
+| File state | Action |
+|-----------|--------|
+| **Unchanged** (hash matches, module `.md` exists) | Restore `ParsedFile` from cache — Tree-sitter is not invoked |
+| **Changed** (hash mismatch) | Re-parse; update manifest entry |
+| **New** | Parse normally; add manifest entry |
+| **Deleted** (in manifest but not on disk) | Remove module `.md`; remove from manifest |
+
+The cache is transparent — output is byte-identical to a full parse. Use `--force`/`--no-cache` to bypass it:
+
+```bash
+repo-parser init --force          # full reparse, then update cache
+```
+
+On a warm cache, re-running `init` on an unchanged `tests/fixtures/` produces **zero `parse_file` calls** — only project index regeneration occurs.
+
+---
+
+## Endpoint & Secret Extraction
+
+After Tree-sitter parsing, every file is scanned by `endpoints.py` regardless of language. It extracts:
+
+| Pattern type | Examples detected |
+|-------------|------------------|
+| HTTP/WS/FTP URLs | `https://api.example.com/v1/charges` |
+| DB connection URIs | `postgres://user:***@db:5432/mydb` |
+| JDBC strings | `jdbc:postgresql://host:5432/db` |
+| `create_engine()` calls | `create_engine("postgresql://user:***@host/db")` |
+| Env var assignments | `DATABASE_URL`, `PGHOST`, `REDIS_URL`, `SPRING_DATASOURCE_URL`, … |
+| KV config lines | `host = db.internal`, `port: 5432`, `"database": "myapp"` |
+
+**Passwords are always redacted** to `***` in all output. Known limitations (multi-line concatenations, f-string interpolation) are documented in `DESIGN.md → Endpoint Extraction → Known Limitations`.
+
+---
+
+## Logging
+
+VegaParser supports configurable log output targets so debugging can happen either in files, in the terminal, or both.
+
+| Option | Effect |
+|--------|--------|
+| `--verbose` | Sets log level to `DEBUG` (default is `INFO`) |
+| `--log-target file` | Write logs to `repo-parser.log` (default) |
+| `--log-target console` | Stream logs to terminal output |
+| `--log-target both` | Write to file and terminal simultaneously |
+
+```bash
+# File logging (default)
+repo-parser init --verbose --log-target file
+
+# Console-only logging
+repo-parser init --verbose --log-target console
+
+# File + console logging
+repo-parser bundle --verbose --log-target both
+```
+
+---
 
 ## Project Layout
 
 ```
-vegaparser/
-├── repo_parser/
-│   ├── cli.py              # init & bundle commands
-│   ├── parser/             # Tree-sitter engines + extractors
-│   ├── generator/          # Markdown + bundle output
-│   ├── traversal/          # Scanner + gitignore
-│   └── ui/                 # Rich progress + file logging
-├── tests/fixtures/         # Sample corpus
-├── DESIGN.md               # Architecture reference
-└── LICENSE                 # GPLv3
+VegaParser/
+├── main.py                         ← entry point (delegates to repo_parser.cli)
+├── pyproject.toml                  ← package metadata, console_scripts
+├── requirements.txt                ← runtime dependencies
+├── requirements-dev.txt            ← pytest, pytest-cov, syrupy, hypothesis
+├── DESIGN.md                       ← architecture deep-dive
+├── CONTRIBUTING.md                 ← developer guide and module reference
+├── CHANGELOG.md
+├── LICENSE                         ← GPLv3
+├── docs/
+│   └── tree-sitter-query-api-evaluation.md
+├── tests/
+│   ├── fixtures/                   ← sample corpus (17 files, 11 languages)
+│   ├── unit/                       ← one test module per source module
+│   └── integration/                ← end-to-end init + bundle + cache tests
+└── repo_parser/
+    ├── cli.py                      ← Typer app: init, bundle
+    ├── models.py                   ← ParsedFile, ClassInfo, FunctionInfo, …
+    ├── cache.py                    ← IndexCache (incremental manifest)
+    ├── traversal/
+    │   └── scanner.py              ← RepositoryScanner
+    ├── parser/
+    │   ├── engine.py               ← ParserEngine
+    │   ├── registry.py             ← extension → language mapping
+    │   ├── extractors/
+    │   │   └── endpoints.py        ← URL & DB extraction + secret redaction
+    │   └── queries/
+    │       ├── base.py             ← node helpers
+    │       ├── python_queries.py
+    │       ├── javascript_queries.py
+    │       ├── common_queries.py   ← Go, Rust, Java, Ruby, C/C++, C#, …
+    │       ├── docker_queries.py
+    │       ├── yaml_queries.py
+    │       ├── sql_queries.py
+    │       ├── hcl_queries.py
+    │       ├── shell_queries.py
+    │       └── env_queries.py
+    ├── generator/
+    │   ├── markdown.py             ← MarkdownGenerator
+    │   ├── bundle.py               ← bundle_knowledge_base
+    │   └── templates/
+    │       ├── module.md.j2
+    │       └── project_index.md.j2
+    ├── stack/
+    │   └── detector.py             ← detect_stack
+    └── ui/
+        ├── console.py
+        ├── progress.py
+        └── logging_config.py
 ```
 
-## Development
-
-```bash
-python main.py init --verbose
-python main.py bundle
-cat repo-parser.log          # inspect file logs
-cat .rag_kb/project_index.md
-```
+---
 
 ## Benchmarking
 
-Run the curated benchmark suite against popular open-source repositories:
+Run the curated GitHub benchmark suite:
 
 ```bash
 python scripts/benchmark_vegaparser.py --list
@@ -151,10 +463,42 @@ python scripts/benchmark_vegaparser.py --language java --warm
 python scripts/benchmark_vegaparser.py --json benchmark-results.json
 ```
 
-Benchmarks clone repositories into `~/.cache/vegaparser-benchmarks/` by default, run `repo_parser` from `main.py`, and report cold-run timing plus an optional warm-cache pass.
+Benchmarks clone repos into `~/.cache/vegaparser-benchmarks/` by default and report cold-run timing plus an optional warm-cache pass.
+
+---
+
+## Testing
+
+```bash
+# Install dev dependencies
+pip install -r requirements-dev.txt
+
+# Run the full suite
+pytest
+
+# With coverage report
+pytest --cov=repo_parser --cov-report=term-missing
+
+# Run a specific module
+pytest tests/unit/test_endpoints_security.py -v
+
+# Run integration tests only
+pytest tests/integration/ -v
+```
+
+Current status: **155 tests · 89 % coverage** on `repo_parser/`.
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every push and pull request against `main`, across Python 3.10, 3.11, and 3.12, and fails if coverage drops below 80 %.
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full developer guide — module-by-module technical reference, how to add a new language, how to write tests, and the contribution workflow.
+
+---
 
 ## License
 
-This project is licensed under the **GNU General Public License v3.0 (GPLv3)**. See the [LICENSE](LICENSE) file for the full text.
-
-You are free to use, modify, and distribute this software under the terms of GPLv3. Derivative works must also be released under GPLv3.
+Licensed under the **GNU General Public License v3.0 (GPLv3)**. See [LICENSE](LICENSE) for the full text.
+Derivative works must also be released under GPLv3.

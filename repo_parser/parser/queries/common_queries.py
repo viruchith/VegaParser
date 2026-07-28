@@ -193,14 +193,6 @@ PROFILES: dict[str, LanguageProfile] = {
         module_kinds=("source_file",),
         comment_kinds=("line_comment", "block_comment", "doc_comment"),
     ),
-    "java": LanguageProfile(
-        language="java",
-        import_kinds=("import_declaration",),
-        class_kinds=("class_declaration", "interface_declaration", "enum_declaration"),
-        function_kinds=("method_declaration", "constructor_declaration"),
-        method_kinds=("method_declaration", "constructor_declaration"),
-        comment_kinds=("line_comment", "block_comment"),
-    ),
     "ruby": LanguageProfile(
         language="ruby",
         import_kinds=(),  # require handled separately
