@@ -8,6 +8,22 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+#### Parser stability on large repositories
+- Eliminated tree-sitter segmentation faults during repository indexing by:
+  - keeping parse-tree lifetimes valid across full AST traversal
+  - removing unstable node-position access paths that could dereference invalid native state
+  - switching line-number derivation to safe byte-offset mapping in shared query helpers
+- Unified parser/query compatibility helpers so mixed tree-sitter API shapes no longer cause
+  crashes or empty-module runs.
+
+#### Benchmark reliability
+- Restored benchmark correctness for light-tier runs after parser stability fixes:
+  - representative targets now complete with non-zero module counts (for example:
+    `python-light=37`, `php-light=217`, `java-light=85`)
+  - benchmark runs no longer report pervasive false `modules=0` due to parser crashes.
+
 ### Changed
 
 #### Benchmark guide
