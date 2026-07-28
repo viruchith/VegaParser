@@ -23,6 +23,18 @@ Versions follow [Semantic Versioning](https://semver.org/).
   - representative targets now complete with non-zero module counts (for example:
     `python-light=37`, `php-light=217`, `java-light=85`)
   - benchmark runs no longer report pervasive false `modules=0` due to parser crashes.
+- Fixed `OSError [Errno 63] File name too long` crash on repos with deeply-nested paths (e.g.
+  JetBrains/kotlin): `sanitize_filename` now truncates long stems to ≤180 bytes and appends a
+  12-hex-char SHA-1 suffix to preserve uniqueness.
+- Fixed `modules=0` for `c-heavy` and `cpp-heavy` targets: removed `--filter=blob:none` from
+  the git clone command — the flag created blobless clones with empty working trees; replaced the
+  unreachable targets (`torvalds/linux`, `llvm/llvm-project`) with practical alternatives
+  (`curl/curl` for C, `grpc/grpc` for C++).
+- Fixed `modules=0` for all `plsql` targets: PL/SQL-specific extensions (`.plsql`, `.pls`,
+  `.pkb`, `.pks`) now return `"plsql"` from `detect_language` instead of `"sql"`, so
+  `--languages plsql` correctly filters PL/SQL source files. The `plsql-heavy` and `plsql-light`
+  benchmark targets now also scan `.sql` files (`("plsql", "sql")` language tuple) because most
+  PL/SQL repos use the `.sql` extension.
 
 ### Changed
 
