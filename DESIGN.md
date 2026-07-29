@@ -12,7 +12,6 @@ vegaparser/
 ├── pyproject.toml                  # pip install + repo-parser console script
 ├── requirements.txt
 ├── DESIGN.md
-├── TODO.md
 ├── README.md
 ├── tests/fixtures/                 # Manual test corpus
 └── repo_parser/
@@ -223,6 +222,39 @@ repo-parser bundle [PATH] [OPTIONS]
 
 ## Testing Strategy
 
-1. `python main.py init tests/fixtures -v` — Docker, K8s, SQL, .env, Go, Terraform, Python
-2. `python main.py init --verbose` — full self-index of vegaparser repo
-3. Inspect `.rag_kb/project_index.md` for aggregated URLs and DB endpoints
+Automated with **pytest**. Run the full suite:
+
+```bash
+pytest --cov=repo_parser --cov-report=term-missing --cov-fail-under=91
+```
+
+Current coverage: **91 %** across `repo_parser/` (342 tests).
+
+### Test layout
+
+| Directory | Scope |
+|-----------|-------|
+| `tests/unit/` | One module per source file — parsers, cache, registry, detectors, node helpers |
+| `tests/integration/` | End-to-end `init` + `bundle` runs; incremental caching lifecycle |
+| `tests/fixtures/` | Minimal source corpus covering Docker, K8s, SQL, .env, Go, Terraform, Python, HCL |
+
+### Snapshot tests
+
+Generated Markdown files are validated with **syrupy** snapshots. Update them with:
+
+```bash
+pytest --snapshot-update
+```
+
+### Key test modules
+
+| Test file | Covers |
+|-----------|--------|
+| `test_dependencies.py` | All import-resolution helpers for Java, Python, JS, Kotlin |
+| `test_base_queries.py` | Tree-sitter node helpers, `strip_docstring_quotes`, signature builders |
+| `test_sql_queries.py` | PL/SQL detection heuristics, fallback extraction, tree-sitter SQL parser path |
+| `test_java_queries.py` | Regex-fallback Java parser + tree-sitter `parse_java` |
+| `test_cache_extended.py` | Full `IndexCache` lifecycle and `ParsedFile` serialisation roundtrip |
+| `test_engine.py` | `ParserEngine` — all language branches, grammar routing, dependency inference |
+| `test_detector.py` | Maven POM, Gradle, Spring prioritisation, `_dedupe_prioritize_spring` |
+| `test_endpoints_security.py` | Property-based secret-redaction tests (hypothesis) |
