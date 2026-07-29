@@ -56,3 +56,114 @@ def test_returns_empty_for_missing_files(tmp_path):
     assert stack["node_packages"] == []
     assert stack["go_modules"] == []
     assert stack["rust_crates"] == []
+
+
+# ── Maven POM parsing ────────────────────────────────────────────────────────
+
+
+def test_detects_maven_pom_dependencies(tmp_path):
+    pom = """\
+<?xml version="1.0"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+    </dependency>
+  </dependencies>
+</project>
+"""
+    (tmp_path / "pom.xml").write_text(pom, encoding="utf-8")
+    stack = detect_stack(tmp_path)
+    assert any("spring-boot-starter-web" in p for p in stack["java_packages"])
+    assert any("jackson-databind" in p for p in stack["java_packages"])
+
+
+def test_spring_dependencies_prioritized(tmp_path):
+    pom = """\
+<?xml version="1.0"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <dependencies>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter</artifactId>
+    </dependency>
+  </dependencies>
+</project>
+"""
+    (tmp_path / "pom.xml").write_text(pom, encoding="utf-8")
+    stack = detect_stack(tmp_path)
+    pkgs = stack["java_packages"]
+    spring_idx = next((i for i, p in enumerate(pkgs) if "spring" in p.lower()), None)
+    jackson_idx = next((i for i, p in enumerate(pkgs) if "jackson" in p.lower()), None)
+    assert spring_idx is not None and jackson_idx is not None
+    assert spring_idx < jackson_idx
+
+
+def test_maven_pom_with_parent(tmp_path):
+    pom = """\
+<?xml version="1.0"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+  </parent>
+</project>
+"""
+    (tmp_path / "pom.xml").write_text(pom, encoding="utf-8")
+    stack = detect_stack(tmp_path)
+    assert any("spring-boot-starter-parent" in p for p in stack["java_packages"])
+
+
+def test_maven_pom_corrupt_xml(tmp_path):
+    (tmp_path / "pom.xml").write_text("NOT XML", encoding="utf-8")
+    # Should not raise
+    stack = detect_stack(tmp_path)
+    assert stack["java_packages"] == []
+
+
+# ── Gradle build parsing ─────────────────────────────────────────────────────
+
+
+def test_detects_gradle_dependencies(tmp_path):
+    gradle = """\
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web:3.0.0'
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.9.0'
+}
+"""
+    (tmp_path / "build.gradle").write_text(gradle, encoding="utf-8")
+    stack = detect_stack(tmp_path)
+    assert any("spring-boot-starter-web" in p for p in stack["java_packages"])
+
+
+# ── pyproject.toml detection ─────────────────────────────────────────────────
+
+
+def test_detects_pyproject_toml(tmp_path):
+    (tmp_path / "pyproject.toml").write_text("[tool.poetry]\nname = 'app'\n", encoding="utf-8")
+    stack = detect_stack(tmp_path)
+    assert any("pyproject.toml" in item for item in stack["other"])
+
+
+# ── _dedupe_prioritize_spring ────────────────────────────────────────────────
+
+
+def test_dedupe_prioritize_spring_deduplicates():
+    from repo_parser.stack.detector import _dedupe_prioritize_spring
+    deps = ["a:b", "a:b", "c:d"]
+    result = _dedupe_prioritize_spring(deps)
+    assert result.count("a:b") == 1
+
+
+def test_dedupe_empty():
+    from repo_parser.stack.detector import _dedupe_prioritize_spring
+    assert _dedupe_prioritize_spring([]) == []
