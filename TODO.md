@@ -62,6 +62,10 @@
 - [x] SEO-optimized README with shields.io badges
 - [x] GPLv3 LICENSE file and pyproject.toml metadata
 
+## Phase 10: Benchmarking
+- [x] Add a benchmark script for popular GitHub repos across supported language groups
+- [ ] Add CI automation to run the benchmark suite on a schedule
+
 ## Future Ideas
 - [ ] JSON / TOML structured config parsers
 - [ ] HTML / CSS / Markdown content indexing

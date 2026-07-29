@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import pathspec
@@ -79,10 +80,16 @@ class RepositoryScanner:
         self.extensions = extensions
         self._gitignore = _load_gitignore(self.root)
 
-    def _should_skip_dir(self, name: str) -> bool:
+    def _should_skip_dir(self, rel_dir_posix: str, name: str) -> bool:
         if name.startswith(".") and name not in {".", ".."}:
             return True
-        return name in SKIP_DIRS or name.endswith(".egg-info")
+        if name in SKIP_DIRS or name.endswith(".egg-info"):
+            return True
+        # Prune whole directories matched by .gitignore instead of walking into
+        # them and filtering file-by-file (huge win on large repos).
+        if self._gitignore is not None and self._gitignore.match_file(rel_dir_posix + "/"):
+            return True
+        return False
 
     def _is_ignored(self, rel_path: str) -> bool:
         if self._gitignore is None:
@@ -93,32 +100,45 @@ class RepositoryScanner:
         """Return sorted list of source file paths relative to root."""
         found: list[Path] = []
 
-        for path in sorted(self.root.rglob("*")):
-            if not path.is_file():
-                continue
+        for dirpath, dirnames, filenames in os.walk(self.root):
+            current_dir = Path(dirpath)
+            rel_dir = current_dir.relative_to(self.root)
+            rel_dir_posix = "" if rel_dir == Path(".") else rel_dir.as_posix()
 
-            rel = path.relative_to(self.root)
-            rel_posix = rel.as_posix()
+            # Prune skip/ignored directories in-place so os.walk never descends
+            # into them (e.g. .git, node_modules, venv, build artifacts).
+            kept_dirs = []
+            for name in dirnames:
+                child_rel_posix = f"{rel_dir_posix}/{name}" if rel_dir_posix else name
+                if self._should_skip_dir(child_rel_posix, name):
+                    continue
+                kept_dirs.append(name)
+            dirnames[:] = sorted(kept_dirs)
 
-            if any(part in SKIP_DIRS or part.startswith(".") for part in rel.parts[:-1]):
-                continue
+            for filename in sorted(filenames):
+                path = current_dir / filename
+                rel = path.relative_to(self.root)
+                rel_posix = rel.as_posix()
 
-            if self._is_ignored(rel_posix):
-                if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug("Ignored by .gitignore: %s", rel_posix)
-                continue
+                if self._is_ignored(rel_posix):
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug("Ignored by .gitignore: %s", rel_posix)
+                    continue
 
-            if _is_binary(path):
-                logger.debug("Skipped binary file: %s", rel_posix)
-                continue
+                # Cheap extension/name checks before touching the filesystem
+                # again for a binary-content sniff.
+                if not self._is_selected_file(path, rel_posix):
+                    logger.debug("Skipped unsupported or filtered file: %s", rel_posix)
+                    continue
 
-            if not self._is_selected_file(path, rel_posix):
-                logger.debug("Skipped unsupported or filtered file: %s", rel_posix)
-                continue
+                if _is_binary(path):
+                    logger.debug("Skipped binary file: %s", rel_posix)
+                    continue
 
-            found.append(rel)
-            logger.debug("Discovered parseable file: %s", rel_posix)
+                found.append(rel)
+                logger.debug("Discovered parseable file: %s", rel_posix)
 
+        found.sort()
         logger.info("Discovered %d files in %s", len(found), self.root)
         return found
 

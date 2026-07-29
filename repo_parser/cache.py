@@ -1,105 +1,113 @@
-"""Incremental indexing cache manifest management."""
+"""Persistence helpers for incremental repository indexing."""
+
 from __future__ import annotations
 
-import dataclasses
-import hashlib
 import json
-import logging
+from dataclasses import asdict
 from pathlib import Path
-from typing import Any
 
 from repo_parser.models import ClassInfo, DatabaseEndpoint, ExternalCall, ExternalUrl, FunctionInfo, ParsedFile
 
-logger = logging.getLogger(__name__)
-
-CACHE_DIR = ".cache"
-MANIFEST_FILE = "manifest.json"
+CACHE_FILENAME = "parse_cache.json"
+CACHE_VERSION = 1
 
 
-def compute_hash(content: str) -> str:
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+def cache_path(root: Path) -> Path:
+    return root.resolve() / ".rag_kb" / CACHE_FILENAME
 
 
-def _parsed_file_to_dict(pf: ParsedFile) -> dict:
-    return dataclasses.asdict(pf)
+def build_filter_signature(languages: set[str] | None, extensions: set[str] | None) -> dict[str, list[str] | None]:
+    return {
+        "languages": sorted(languages) if languages else None,
+        "extensions": sorted(extensions) if extensions else None,
+    }
 
 
-def _dict_to_parsed_file(data: dict) -> ParsedFile:
-    """Reconstruct ParsedFile from a serialized dict."""
-    data = dict(data)
-    data["classes"] = [
-        ClassInfo(
-            name=c["name"],
-            docstring=c.get("docstring"),
-            bases=c.get("bases", []),
-            decorators=c.get("decorators", []),
-            methods=[
-                FunctionInfo(**m) for m in c.get("methods", [])
-            ],
-            line_start=c.get("line_start", 0),
-            line_end=c.get("line_end", 0),
-        )
-        for c in data.get("classes", [])
-    ]
-    data["functions"] = [FunctionInfo(**f) for f in data.get("functions", [])]
-    data["external_calls"] = [ExternalCall(**e) for e in data.get("external_calls", [])]
-    data["external_urls"] = [ExternalUrl(**e) for e in data.get("external_urls", [])]
-    data["database_endpoints"] = [DatabaseEndpoint(**e) for e in data.get("database_endpoints", [])]
-    return ParsedFile(**data)
+def load_cache(root: Path) -> dict | None:
+    path = cache_path(root)
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
 
 
-class IndexCache:
-    """Manages a per-repo manifest for incremental re-indexing."""
+def save_cache(root: Path, payload: dict) -> Path:
+    path = cache_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
+    return path
 
-    def __init__(self, rag_kb_dir: Path) -> None:
-        self.cache_dir = rag_kb_dir / CACHE_DIR
-        self.manifest_path = self.cache_dir / MANIFEST_FILE
-        self._manifest: dict[str, dict] = {}
 
-    def load(self) -> None:
-        logger.debug("Loading cache manifest from %s", self.manifest_path)
-        if self.manifest_path.is_file():
-            try:
-                self._manifest = json.loads(self.manifest_path.read_text("utf-8"))
-                logger.info("Loaded cache manifest with %d entries", len(self._manifest))
-            except (OSError, json.JSONDecodeError) as exc:
-                logger.warning("Could not load cache manifest: %s", exc)
-                self._manifest = {}
-        else:
-            self._manifest = {}
-            logger.debug("No cache manifest found at %s", self.manifest_path)
+def file_signature(path: Path) -> dict[str, int]:
+    stat = path.stat()
+    return {"mtime_ns": stat.st_mtime_ns, "size": stat.st_size}
 
-    def save(self) -> None:
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.manifest_path.write_text(json.dumps(self._manifest, indent=2), "utf-8")
-        logger.info("Saved cache manifest with %d entries to %s", len(self._manifest), self.manifest_path)
 
-    def is_cached(self, rel_path: str, content_hash: str, module_file: Path) -> bool:
-        entry = self._manifest.get(rel_path)
-        if entry is None:
-            return False
-        return entry.get("hash") == content_hash and module_file.is_file()
+def parsed_file_to_dict(parsed: ParsedFile) -> dict:
+    return asdict(parsed)
 
-    def get_cached_parsed_file(self, rel_path: str) -> ParsedFile | None:
-        entry = self._manifest.get(rel_path)
-        if entry is None or "parsed" not in entry:
-            return None
-        try:
-            return _dict_to_parsed_file(entry["parsed"])
-        except Exception as exc:
-            logger.warning("Could not deserialize cached ParsedFile for %s: %s", rel_path, exc)
-            return None
 
-    def update(self, rel_path: str, content_hash: str, parsed_data: dict | None = None) -> None:
-        entry: dict[str, Any] = {"hash": content_hash}
-        if parsed_data is not None:
-            entry["parsed"] = parsed_data
-        self._manifest[rel_path] = entry
-        logger.debug("Updated cache entry: %s", rel_path)
+def _class_from_dict(data: dict) -> ClassInfo:
+    return ClassInfo(
+        name=data["name"],
+        docstring=data.get("docstring"),
+        bases=list(data.get("bases", [])),
+        decorators=list(data.get("decorators", [])),
+        methods=[_function_from_dict(item) for item in data.get("methods", [])],
+        line_start=int(data.get("line_start", 0)),
+        line_end=int(data.get("line_end", 0)),
+    )
 
-    def remove(self, rel_path: str) -> None:
-        self._manifest.pop(rel_path, None)
-        logger.debug("Removed cache entry: %s", rel_path)
 
-    def known_paths(self) -> set[str]:
-        return set(self._manifest.keys())
+def _function_from_dict(data: dict) -> FunctionInfo:
+    return FunctionInfo(
+        name=data["name"],
+        signature=data.get("signature", ""),
+        docstring=data.get("docstring"),
+        decorators=list(data.get("decorators", [])),
+        is_method=bool(data.get("is_method", False)),
+        parent_class=data.get("parent_class"),
+        line_start=int(data.get("line_start", 0)),
+        line_end=int(data.get("line_end", 0)),
+        internal_calls=list(data.get("internal_calls", [])),
+    )
+
+
+def _external_call_from_dict(data: dict) -> ExternalCall:
+    return ExternalCall(pattern=data["pattern"], line=int(data.get("line", 0)), context=data.get("context", ""))
+
+
+def _external_url_from_dict(data: dict) -> ExternalUrl:
+    return ExternalUrl(url=data["url"], line=int(data.get("line", 0)), context=data.get("context", ""))
+
+
+def _database_endpoint_from_dict(data: dict) -> DatabaseEndpoint:
+    return DatabaseEndpoint(
+        connection_type=data["connection_type"],
+        host=data.get("host"),
+        port=data.get("port"),
+        user=data.get("user"),
+        schema=data.get("schema"),
+        database=data.get("database"),
+        line=int(data.get("line", 0)),
+        context=data.get("context", ""),
+        raw_redacted=data.get("raw_redacted", ""),
+    )
+
+
+def parsed_file_from_dict(data: dict) -> ParsedFile:
+    return ParsedFile(
+        filepath=data["filepath"],
+        language=data["language"],
+        module_docstring=data.get("module_docstring"),
+        imports=list(data.get("imports", [])),
+        exports=list(data.get("exports", [])),
+        classes=[_class_from_dict(item) for item in data.get("classes", [])],
+        functions=[_function_from_dict(item) for item in data.get("functions", [])],
+        external_calls=[_external_call_from_dict(item) for item in data.get("external_calls", [])],
+        external_urls=[_external_url_from_dict(item) for item in data.get("external_urls", [])],
+        database_endpoints=[_database_endpoint_from_dict(item) for item in data.get("database_endpoints", [])],
+        internal_dependencies=list(data.get("internal_dependencies", [])),
+    )

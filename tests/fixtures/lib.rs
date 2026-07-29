@@ -14,7 +14,6 @@ impl Database {
             name: name.to_string(),
         }
     }
-    
     pub fn connection_string(&self) -> String {
         format!("postgres://{}:{}/{}", self.host, self.port, self.name)
     }

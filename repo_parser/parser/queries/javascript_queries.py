@@ -7,12 +7,15 @@ import re
 from repo_parser.models import ClassInfo, ExternalCall, FunctionInfo, ParsedFile
 from repo_parser.parser.queries.base import (
     build_js_signature,
+    child_count,
     find_child_by_kind,
     iter_nodes,
     line_end,
     line_number,
     node_kind,
+    node_parent,
     node_text,
+    parse_root,
     strip_docstring_quotes,
 )
 
@@ -28,17 +31,10 @@ EXTERNAL_CALL_PATTERNS = [
     (re.compile(r"\bopenai\.\w+\b"), "API (OpenAI SDK)"),
 ]
 
-JS_IMPORT_FROM_RE = re.compile(
-    r"""import\s+(?:type\s+)?(?:[\w*{}\s,$]+\s+from\s+)?['"]([^'"]+)['"]""",
-)
-JS_REQUIRE_RE = re.compile(
-    r"""require\s*\(\s*['"]([^'"]+)['"]\s*\)""",
-)
-
 
 def _extract_leading_comment(root, source: str) -> str | None:
     comments = []
-    for i in range(root.child_count()):
+    for i in range(child_count(root)):
         child = root.child(i)
         if node_kind(child) == "comment":
             text = node_text(source, child).strip()
@@ -53,7 +49,7 @@ def _extract_leading_comment(root, source: str) -> str | None:
 
 
 def _extract_class_docstring(source: str, class_node) -> str | None:
-    for i in range(class_node.child_count()):
+    for i in range(child_count(class_node)):
         child = class_node.child(i)
         if node_kind(child) == "comment":
             text = node_text(source, child)
@@ -63,13 +59,13 @@ def _extract_class_docstring(source: str, class_node) -> str | None:
 
 
 def _is_exported(node) -> bool:
-    parent = node.parent()
+    parent = node_parent(node)
     while parent:
         if node_kind(parent) in ("export_statement", "export_declaration"):
             return True
         if node_kind(parent) == "program":
             return False
-        parent = parent.parent()
+        parent = node_parent(parent)
     return False
 
 
@@ -80,33 +76,18 @@ def _is_require_call(node, source: str) -> bool:
     return func is not None and node_text(source, func) == "require"
 
 
-def _detect_external_calls(source: str, root) -> list[ExternalCall]:
-    results: list[ExternalCall] = []
-    seen: set[tuple[int, str]] = set()
-
-    for call_node in iter_nodes(root, "call_expression"):
-        func_node = call_node.child_by_field_name("function")
-        if not func_node:
-            continue
-        call_text = node_text(source, func_node)
-        full_call = node_text(source, call_node)
-        line = line_number(call_node)
-
-        for pattern, label in EXTERNAL_CALL_PATTERNS:
-            if pattern.search(call_text) or pattern.search(full_call):
-                key = (line, label)
-                if key not in seen:
-                    seen.add(key)
-                    context = full_call.strip()[:120]
-                    results.append(ExternalCall(pattern=label, line=line, context=context))
-                break
-
-    return results
+def _parent_class_name(node, source: str) -> str | None:
+    parent = node_parent(node)
+    while parent:
+        if node_kind(parent) == "class_declaration":
+            name_node = parent.child_by_field_name("name")
+            return node_text(source, name_node) if name_node else None
+        parent = node_parent(parent)
+    return None
 
 
 def parse_javascript(filepath: str, source: str, parser, lang_name: str = "javascript") -> ParsedFile:
-    tree = parser.parse(source)
-    root = tree.root_node()
+    _tree, root = parse_root(parser, source)
 
     parsed = ParsedFile(
         filepath=filepath,
@@ -114,85 +95,89 @@ def parse_javascript(filepath: str, source: str, parser, lang_name: str = "javas
         module_docstring=_extract_leading_comment(root, source),
     )
 
+    class_methods: dict[str, list[FunctionInfo]] = {}
+    external_seen: set[tuple[int, str]] = set()
+
     for node in iter_nodes(root):
         kind = node_kind(node)
         if kind == "import_statement":
             imp = node_text(source, node).strip()
             if imp:
                 parsed.imports.append(imp)
-        elif kind == "lexical_declaration":
-            # const x = require('...')
-            for child in iter_nodes(node, "call_expression"):
-                if _is_require_call(child, source):
-                    m = JS_REQUIRE_RE.search(node_text(source, child))
-                    if m:
-                        parsed.imports.append(f"require('{m.group(1)}')")
-        elif _is_require_call(node, source):
-            m = JS_REQUIRE_RE.search(node_text(source, node))
-            if m:
-                parsed.imports.append(f"require('{m.group(1)}')")
-
-    # Regex fallback for import/export-from variants
-    for match in JS_IMPORT_FROM_RE.finditer(source):
-        stmt = f"import from '{match.group(1)}'"
-        if stmt not in parsed.imports:
-            parsed.imports.append(f"import ... from '{match.group(1)}'")
-    for match in JS_REQUIRE_RE.finditer(source):
-        stmt = f"require('{match.group(1)}')"
-        if stmt not in parsed.imports:
-            parsed.imports.append(stmt)
-
-    for class_node in iter_nodes(root, "class_declaration"):
-        name_node = class_node.child_by_field_name("name")
-        if not name_node:
             continue
-        class_name = node_text(source, name_node)
 
-        methods: list[FunctionInfo] = []
-        body = class_node.child_by_field_name("body")
-        if body:
-            for method_node in iter_nodes(body, "method_definition"):
-                mname_node = method_node.child_by_field_name("name")
-                if mname_node:
-                    mname = node_text(source, mname_node)
-                    methods.append(
-                        FunctionInfo(
-                            name=mname,
-                            signature=build_js_signature(source, method_node, mname),
-                            is_method=True,
-                            parent_class=class_name,
-                            line_start=line_number(method_node),
-                            line_end=line_end(method_node),
-                        )
-                    )
+        if _is_require_call(node, source):
+            imp = node_text(source, node).strip()
+            if imp:
+                parsed.imports.append(imp)
+            continue
 
-        parsed.classes.append(
-            ClassInfo(
+        if kind == "class_declaration":
+            name_node = node.child_by_field_name("name")
+            if not name_node:
+                continue
+            class_name = node_text(source, name_node)
+            class_info = ClassInfo(
                 name=class_name,
-                docstring=_extract_class_docstring(source, class_node),
-                methods=methods,
-                line_start=line_number(class_node),
-                line_end=line_end(class_node),
+                docstring=_extract_class_docstring(source, node),
+                methods=class_methods.setdefault(class_name, []),
+                line_start=line_number(source, node),
+                line_end=line_end(source, node),
             )
-        )
-        parsed.exports.append(class_name)
-
-    for func_node in iter_nodes(root, "function_declaration"):
-        name_node = func_node.child_by_field_name("name")
-        if not name_node:
+            parsed.classes.append(class_info)
+            parsed.exports.append(class_name)
             continue
-        func_name = node_text(source, name_node)
 
-        parsed.functions.append(
-            FunctionInfo(
-                name=func_name,
-                signature=build_js_signature(source, func_node, func_name),
-                line_start=line_number(func_node),
-                line_end=line_end(func_node),
+        if kind == "method_definition":
+            class_name = _parent_class_name(node, source)
+            name_node = node.child_by_field_name("name")
+            if not class_name or not name_node:
+                continue
+            method_name = node_text(source, name_node)
+            class_methods.setdefault(class_name, []).append(
+                FunctionInfo(
+                    name=method_name,
+                    signature=build_js_signature(source, node, method_name),
+                    is_method=True,
+                    parent_class=class_name,
+                    line_start=line_number(source, node),
+                    line_end=line_end(source, node),
+                )
             )
-        )
-        if _is_exported(func_node):
-            parsed.exports.append(func_name)
+            continue
 
-    parsed.external_calls = _detect_external_calls(source, root)
+        if kind == "function_declaration":
+            name_node = node.child_by_field_name("name")
+            if not name_node:
+                continue
+            func_name = node_text(source, name_node)
+            parsed.functions.append(
+                FunctionInfo(
+                    name=func_name,
+                    signature=build_js_signature(source, node, func_name),
+                    line_start=line_number(source, node),
+                    line_end=line_end(source, node),
+                )
+            )
+            if _is_exported(node):
+                parsed.exports.append(func_name)
+            continue
+
+        if kind == "call_expression":
+            func_node = node.child_by_field_name("function")
+            if not func_node:
+                continue
+            call_text = node_text(source, func_node)
+            full_call = node_text(source, node)
+            line = line_number(source, node)
+            for pattern, label in EXTERNAL_CALL_PATTERNS:
+                if pattern.search(call_text) or pattern.search(full_call):
+                    key = (line, label)
+                    if key not in external_seen:
+                        external_seen.add(key)
+                        parsed.external_calls.append(
+                            ExternalCall(pattern=label, line=line, context=full_call.strip()[:120])
+                        )
+                    break
+
     return parsed

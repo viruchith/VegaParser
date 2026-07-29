@@ -7,7 +7,7 @@
 
 **VegaParser** is a command-line tool that turns any local code repository into a structured **Markdown knowledge base** optimised for Large Language Models. It walks your source tree, parses every file with **Tree-sitter AST analysis**, enriches results with regex-based endpoint and secret extraction, and writes clean, YAML-frontmatted Markdown that can be injected directly into an LLM's context window.
 
-> **v0.2.0** — incremental caching, hardened secret redaction, 155-test suite (89 % coverage).  
+> **v0.2.0** — incremental caching, hardened secret redaction, 155-test suite (89 % coverage).
 > See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 
 ---
@@ -27,9 +27,10 @@
 9. [Endpoint & Secret Extraction](#endpoint--secret-extraction)
 10. [Logging](#logging)
 11. [Project Layout](#project-layout)
-12. [Testing](#testing)
-13. [Contributing](#contributing)
-14. [License](#license)
+12. [Benchmarking](#benchmarking)
+13. [Testing](#testing)
+14. [Contributing](#contributing)
+15. [License](#license)
 
 ---
 
@@ -452,6 +453,143 @@ VegaParser/
 
 ---
 
+## Benchmarking
+
+Use the benchmark runner to measure VegaParser across curated heavy/light open-source repositories per language group.
+
+### Prerequisites
+
+- Python 3.10+
+- `git` available on PATH
+- Enough disk/network capacity for cloned benchmark repos (heavy targets can be very large)
+
+### Quick commands
+
+```bash
+# Show all benchmark targets (id, tier, languages, repo)
+python scripts/benchmark_vegaparser.py --list
+
+# Run every heavy target once (cold run)
+python scripts/benchmark_vegaparser.py --tier heavy
+
+# Run only Java targets with a warm-cache pass
+python scripts/benchmark_vegaparser.py --language java --warm
+
+# Show detailed live logs for each clone/run step
+python scripts/benchmark_vegaparser.py --tier light --verbose
+
+# Pin exact targets and average 3 cold runs
+python scripts/benchmark_vegaparser.py \
+  --repo java-heavy --repo java-light \
+  --repeat 3
+
+# Save machine-readable output
+python scripts/benchmark_vegaparser.py --json benchmark-results.json
+```
+
+### Example runs
+
+```bash
+# 1) Full smoke run (all targets, one cold run each)
+python scripts/benchmark_vegaparser.py
+
+# 2) Heavy repos only, force fresh clone to avoid stale state
+python scripts/benchmark_vegaparser.py --tier heavy --refresh
+
+# 3) Java comparison with averaging + warm-cache pass
+python scripts/benchmark_vegaparser.py \
+  --repo java-heavy --repo java-light \
+  --repeat 5 \
+  --warm \
+  --json results/java-benchmark.json
+
+# 4) Language-focused run across multiple families
+python scripts/benchmark_vegaparser.py \
+  --language python \
+  --language javascript \
+  --repeat 3 \
+  --json results/py-js.json
+
+# 5) Run in a custom workspace directory
+python scripts/benchmark_vegaparser.py \
+  --workspace /tmp/vegaparser-bench \
+  --tier light \
+  --json /tmp/vegaparser-bench/light.json
+```
+
+### Common options
+
+| Option | Purpose |
+|---|---|
+| `--tier {heavy,light,all}` | Filter target size profile |
+| `--language <lang>` (repeatable) | Keep targets containing one of the given languages |
+| `--repo <id>` (repeatable) | Run exact benchmark ids from `--list` |
+| `--repeat <n>` | Average `n` cold runs per target |
+| `--warm` | Add one warm-cache run after cold run(s) |
+| `--refresh` | Re-clone repositories before benchmarking |
+| `--workspace <path>` | Custom clone/cache directory (default: `~/.cache/vegaparser-benchmarks`) |
+| `--json <file>` | Export full results as JSON |
+| `--verbose` | Print detailed step-by-step progress logs during clone and runs |
+
+### Cold vs warm runs
+
+VegaParser has a file-level incremental cache (`parse_cache.json` inside `.rag_kb/`).
+Each cache entry stores the file's `mtime_ns` and `size`.
+On re-index, if those values match, the tree-sitter parse step is skipped entirely and
+the cached `ParsedFile` record is reused — only markdown generation runs.
+
+The benchmark exploits this to measure two distinct performance profiles:
+
+| Mode | What happens | When `.rag_kb` exists? | Measures |
+|---|---|---|---|
+| **Cold** | `.rag_kb` deleted before every run | No | Full parse: file I/O + tree-sitter + markdown write |
+| **Warm** | `.rag_kb` kept from the cold run | Yes (all cache hits) | Incremental reindex: cache load + markdown write only |
+
+**Enabling a warm pass:**
+
+```bash
+# Run cold once, then warm once, for all Java targets
+python scripts/benchmark_vegaparser.py --language java --warm --verbose
+
+# Average 3 cold runs and follow with a warm pass, save to JSON
+python scripts/benchmark_vegaparser.py \
+  --repo kotlin-heavy \
+  --repeat 3 \
+  --warm \
+  --json results/kotlin-cold-vs-warm.json
+```
+
+**What to expect:**
+On an unchanged repo (the benchmark case), warm times are dramatically lower than cold.
+For example, a `kotlin-heavy` cold run of ~50 s typically drops to ~2–5 s warm, because
+all 67 000+ modules are cache hits and tree-sitter is never invoked.
+The `warm_s` column in the result table and JSON captures this timing.
+
+> **Note:** `warm_s` is `null` / `-` when `--warm` is not passed.
+
+### Output columns
+
+- `cold_avg_s`: average of cold-run timings (`--repeat`)
+- `cold_min_s` / `cold_max_s`: spread across cold runs (only meaningful when `--repeat` > 1)
+- `warm_s`: warm-cache timing (`--warm`) — `null` when not requested
+- `modules`: number of module markdown files generated
+- `status`: `ok`, clone failure, parse failure, or other error
+
+### Recommended workflow for reliable comparisons
+
+1. Run once with `--refresh --repeat 1` to establish a clean cold baseline.
+2. Run again with `--warm --repeat 3` to compare cold vs warm behavior.
+3. Keep the same machine/load conditions (CPU governor, background jobs, network) across runs.
+4. Track result JSON files over time to compare branches or releases.
+
+### Notes
+
+- By default, repositories are cloned and reused in `~/.cache/vegaparser-benchmarks/`.
+- A single target failing clone/parse does **not** abort the whole suite; status is recorded per target.
+- For quick local checks, prefer a small subset (`--repo` or `--language`) before full heavy runs.
+
+---
+
 ## Testing
 
 ```bash
@@ -485,5 +623,5 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full developer guide — module-b
 
 ## License
 
-Licensed under the **GNU General Public License v3.0 (GPLv3)**. See [LICENSE](LICENSE) for the full text.  
+Licensed under the **GNU General Public License v3.0 (GPLv3)**. See [LICENSE](LICENSE) for the full text.
 Derivative works must also be released under GPLv3.

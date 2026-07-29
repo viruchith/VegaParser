@@ -7,12 +7,15 @@ import re
 from repo_parser.models import ClassInfo, ExternalCall, FunctionInfo, ParsedFile
 from repo_parser.parser.queries.base import (
     build_python_signature,
+    child_count,
     find_child_by_kind,
     iter_nodes,
     line_end,
     line_number,
     node_kind,
+    node_parent,
     node_text,
+    parse_root,
     strip_docstring_quotes,
 )
 
@@ -33,12 +36,12 @@ EXTERNAL_CALL_PATTERNS = [
 
 
 def _is_module_level(node) -> bool:
-    parent = node.parent()
+    parent = node_parent(node)
     return parent is not None and node_kind(parent) == "module"
 
 
 def _extract_module_docstring(root, source: str) -> str | None:
-    for i in range(root.child_count()):
+    for i in range(child_count(root)):
         child = root.child(i)
         if node_kind(child) == "expression_statement":
             string_node = find_child_by_kind(child, "string")
@@ -51,7 +54,7 @@ def _extract_module_docstring(root, source: str) -> str | None:
 
 def _extract_decorators(source: str, node) -> list[str]:
     decorators = []
-    for i in range(node.child_count()):
+    for i in range(child_count(node)):
         child = node.child(i)
         if node_kind(child) == "decorator":
             decorators.append(node_text(source, child).strip())
@@ -61,7 +64,7 @@ def _extract_decorators(source: str, node) -> list[str]:
 def _extract_block_docstring(source: str, body) -> str | None:
     if body is None:
         return None
-    for i in range(body.child_count()):
+    for i in range(child_count(body)):
         child = body.child(i)
         if node_kind(child) == "expression_statement":
             string_node = find_child_by_kind(child, "string")
@@ -77,7 +80,7 @@ def _extract_bases(source: str, class_node) -> list[str]:
     if not arg_list:
         return []
     bases = []
-    for i in range(arg_list.child_count()):
+    for i in range(child_count(arg_list)):
         child = arg_list.child(i)
         if node_kind(child) in ("identifier", "attribute", "call"):
             bases.append(node_text(source, child))
@@ -97,63 +100,39 @@ def _extract_internal_calls(source: str, func_node) -> list[str]:
 
 def _is_nested_function(func_node) -> bool:
     """Skip function definitions nested inside other functions."""
-    parent = func_node.parent()
+    parent = node_parent(func_node)
     while parent:
         if node_kind(parent) == "function_definition":
             return True
         if node_kind(parent) in ("module", "class_definition", "decorated_definition"):
             return False
-        parent = parent.parent()
+        parent = node_parent(parent)
     return False
 
 
 def _is_method(func_node) -> bool:
-    parent = func_node.parent()
+    parent = node_parent(func_node)
     while parent:
         if node_kind(parent) == "class_definition":
             return True
         if node_kind(parent) in ("module", "decorated_definition"):
             return False
-        parent = parent.parent()
+        parent = node_parent(parent)
     return False
 
 
 def _parent_class_name(func_node, source: str) -> str | None:
-    parent = func_node.parent()
+    parent = node_parent(func_node)
     while parent:
         if node_kind(parent) == "class_definition":
             name_node = parent.child_by_field_name("name")
             return node_text(source, name_node) if name_node else None
-        parent = parent.parent()
+        parent = node_parent(parent)
     return None
 
 
-def _detect_external_calls(source: str, root) -> list[ExternalCall]:
-    results: list[ExternalCall] = []
-    seen: set[tuple[int, str]] = set()
-
-    for call_node in iter_nodes(root, "call"):
-        func_node = call_node.child_by_field_name("function")
-        if not func_node:
-            continue
-        call_text = node_text(source, func_node)
-        line = line_number(call_node)
-
-        for pattern, label in EXTERNAL_CALL_PATTERNS:
-            if pattern.search(call_text):
-                key = (line, label)
-                if key not in seen:
-                    seen.add(key)
-                    context = node_text(source, call_node).strip()[:120]
-                    results.append(ExternalCall(pattern=label, line=line, context=context))
-                break
-
-    return results
-
-
 def parse_python(filepath: str, source: str, parser) -> ParsedFile:
-    tree = parser.parse(source)
-    root = tree.root_node()
+    _tree, root = parse_root(parser, source)
 
     parsed = ParsedFile(
         filepath=filepath,
@@ -161,64 +140,81 @@ def parse_python(filepath: str, source: str, parser) -> ParsedFile:
         module_docstring=_extract_module_docstring(root, source),
     )
 
+    class_methods: dict[str, list[FunctionInfo]] = {}
+    external_seen: set[tuple[int, str]] = set()
+
     for node in iter_nodes(root):
         kind = node_kind(node)
         if kind in ("import_statement", "import_from_statement") and _is_module_level(node):
             imp = node_text(source, node).strip()
             if imp:
                 parsed.imports.append(imp)
-
-    class_methods: dict[str, list[FunctionInfo]] = {}
-
-    for class_node in iter_nodes(root, "class_definition"):
-        name_node = class_node.child_by_field_name("name")
-        if not name_node:
             continue
-        class_name = node_text(source, name_node)
 
-        class_info = ClassInfo(
-            name=class_name,
-            docstring=_extract_block_docstring(source, class_node.child_by_field_name("body")),
-            bases=_extract_bases(source, class_node),
-            decorators=_extract_decorators(source, class_node),
-            line_start=line_number(class_node),
-            line_end=line_end(class_node),
-        )
-        parsed.classes.append(class_info)
-        class_methods[class_name] = class_info.methods
-
-    for func_node in iter_nodes(root, "function_definition"):
-        if _is_nested_function(func_node):
+        if kind == "class_definition":
+            name_node = node.child_by_field_name("name")
+            if not name_node:
+                continue
+            class_name = node_text(source, name_node)
+            class_info = ClassInfo(
+                name=class_name,
+                docstring=_extract_block_docstring(source, node.child_by_field_name("body")),
+                bases=_extract_bases(source, node),
+                decorators=_extract_decorators(source, node),
+                line_start=line_number(source, node),
+                line_end=line_end(source, node),
+            )
+            parsed.classes.append(class_info)
+            class_methods[class_name] = class_info.methods
             continue
-        name_node = func_node.child_by_field_name("name")
-        if not name_node:
+
+        if kind == "function_definition":
+            if _is_nested_function(node):
+                continue
+            name_node = node.child_by_field_name("name")
+            if not name_node:
+                continue
+            func_name = node_text(source, name_node)
+            is_method = _is_method(node)
+            parent = _parent_class_name(node, source)
+            func_info = FunctionInfo(
+                name=func_name,
+                signature=build_python_signature(source, node, func_name),
+                docstring=_extract_block_docstring(source, node.child_by_field_name("body")),
+                decorators=_extract_decorators(source, node),
+                is_method=is_method,
+                parent_class=parent,
+                line_start=line_number(source, node),
+                line_end=line_end(source, node),
+                internal_calls=_extract_internal_calls(source, node),
+            )
+
+            if is_method and parent and parent in class_methods:
+                class_methods[parent].append(func_info)
+            else:
+                parsed.functions.append(func_info)
+
+            if not is_method:
+                parsed.exports.append(func_name)
             continue
-        func_name = node_text(source, name_node)
-        is_method = _is_method(func_node)
-        parent = _parent_class_name(func_node, source)
 
-        func_info = FunctionInfo(
-            name=func_name,
-            signature=build_python_signature(source, func_node, func_name),
-            docstring=_extract_block_docstring(source, func_node.child_by_field_name("body")),
-            decorators=_extract_decorators(source, func_node),
-            is_method=is_method,
-            parent_class=parent,
-            line_start=line_number(func_node),
-            line_end=line_end(func_node),
-            internal_calls=_extract_internal_calls(source, func_node),
-        )
+        if kind == "call":
+            func_node = node.child_by_field_name("function")
+            if not func_node:
+                continue
+            call_text = node_text(source, func_node)
+            line = line_number(source, node)
 
-        if is_method and parent and parent in class_methods:
-            class_methods[parent].append(func_info)
-        else:
-            parsed.functions.append(func_info)
-
-        if not is_method:
-            parsed.exports.append(func_name)
+            for pattern, label in EXTERNAL_CALL_PATTERNS:
+                if pattern.search(call_text):
+                    key = (line, label)
+                    if key not in external_seen:
+                        external_seen.add(key)
+                        context = node_text(source, node).strip()[:120]
+                        parsed.external_calls.append(ExternalCall(pattern=label, line=line, context=context))
+                    break
 
     for cls in parsed.classes:
         parsed.exports.append(cls.name)
 
-    parsed.external_calls = _detect_external_calls(source, root)
     return parsed

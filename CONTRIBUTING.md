@@ -311,7 +311,7 @@ Runs **on every parsed file** after language-specific extraction, regardless of 
 
 **Regex patterns (in order of evaluation per line):**
 
-1. **`ENV_VAR_LINE`** — `^(?:export )?([A-Z][A-Z0-9_]*)\s*=\s*(.+)$`  
+1. **`ENV_VAR_LINE`** — `^(?:export )?([A-Z][A-Z0-9_]*)\s*=\s*(.+)$`
    If the variable name is in `ENV_CONNECTION_VARS`, the value is parsed as a URI or stored as a partial endpoint. Variable names not in the set are silently ignored.
 
 2. **`CONFIG_KV_PATTERNS`** — five patterns for `host=`, `port=`, `user=`, `database=`, `schema=` with variations (`db_host`, `hostname`, `db_user`, `username`, etc.). Multi-field lines are coalesced into one `DatabaseEndpoint`.

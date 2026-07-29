@@ -1,8 +1,70 @@
 # Changelog
 
-All notable changes to VegaParser are documented here.  
-Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).  
+All notable changes to VegaParser are documented here.
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/).
+
+---
+
+## [Unreleased]
+
+### Fixed
+
+#### Parser stability on large repositories
+- Eliminated tree-sitter segmentation faults during repository indexing by:
+  - keeping parse-tree lifetimes valid across full AST traversal
+  - removing unstable node-position access paths that could dereference invalid native state
+  - switching line-number derivation to safe byte-offset mapping in shared query helpers
+- Unified parser/query compatibility helpers so mixed tree-sitter API shapes no longer cause
+  crashes or empty-module runs.
+
+#### Benchmark reliability
+- Restored benchmark correctness for light-tier runs after parser stability fixes:
+  - representative targets now complete with non-zero module counts (for example:
+    `python-light=37`, `php-light=217`, `java-light=85`)
+  - benchmark runs no longer report pervasive false `modules=0` due to parser crashes.
+- Fixed `OSError [Errno 63] File name too long` crash on repos with deeply-nested paths (e.g.
+  JetBrains/kotlin): `sanitize_filename` now truncates long stems to ≤180 bytes and appends a
+  12-hex-char SHA-1 suffix to preserve uniqueness.
+- Fixed `modules=0` for `c-heavy` and `cpp-heavy` targets: removed `--filter=blob:none` from
+  the git clone command — the flag created blobless clones with empty working trees; replaced the
+  unreachable targets (`torvalds/linux`, `llvm/llvm-project`) with practical alternatives
+  (`curl/curl` for C, `grpc/grpc` for C++).
+- Fixed `OSError [Errno 66] Directory not empty` crash during benchmark cleanup on macOS/Python
+  3.14: `clear_generated_outputs` now catches `OSError` from `shutil.rmtree` and falls back to
+  `subprocess rm -rf`, which is immune to the fd-based traversal issue that trips Python 3.14's
+  `_rmtree_safe_fd` on `.rag_kb` directories containing over-long filenames written before the
+  `sanitize_filename` fix.
+
+### Changed
+
+#### Benchmark guide
+- Expanded `README.md` benchmark documentation with:
+  - prerequisites and quick-start commands
+  - a dedicated "Example runs" section (full suite, heavy-only, Java A/B, multi-language, custom workspace)
+  - option reference table and output-column interpretation
+  - recommended workflow for repeatable performance comparisons
+
+#### Benchmark runner UX
+- Updated `scripts/benchmark_vegaparser.py` to print live progress by default:
+  - run banner with selected target count and options
+  - per-target progress (`[i/N]`) and completion summaries
+  - final summary table
+- Added `--verbose` for detailed step logs (clone/cache actions, per-run timings, and failure stderr tail).
+
+#### Benchmark baseline results
+- Full-suite cold benchmark (`42` targets, `repeat=1`, `warm=False`) now completes end-to-end with
+  `rc=0` / `status=ok` across the suite after the stability and target fixes.
+- Previously failing/incorrect targets now produce valid non-zero outputs:
+  - `kotlin-heavy`: `51.00s`, `67240` modules (no filename-length crash)
+  - `c-heavy` / `cpp-heavy`: `1.84s` / `5.45s`, `1014` / `1911` modules (no blobless empty clone)
+  - `plsql-heavy` / `plsql-light`: `3.45s` / `0.75s`, `89` / `262` modules (correct language mapping)
+- Current cold-run heavy-tier hotspots by wall time:
+  - `csharp-heavy` (`110.99s`)
+  - `kotlin-heavy` (`51.00s`)
+  - `typescript-heavy` (`43.19s`)
+  - `go-heavy` (`40.09s`)
+  - `rust-heavy` (`36.68s`)
 
 ---
 
@@ -102,4 +164,3 @@ Versions follow [Semantic Versioning](https://semver.org/).
 - `pyproject.toml` with `repo-parser` console script entry point
 - 7 initial fixture files: `.env`, `Dockerfile`, `config_sample.py`, `main.go`, `main.tf`,
   `schema.plsql`, `k8s/deployment.yaml`
-
