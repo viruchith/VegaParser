@@ -46,7 +46,7 @@ pip install -r requirements.txt -r requirements-dev.txt
 pip install -e .                 # editable install for the console script
 
 # Verify
-pytest                           # 155 tests should pass
+pytest                           # 342 tests should pass
 repo-parser --help
 ```
 
@@ -700,8 +700,16 @@ tests/
 │   ├── test_endpoints_security.py
 │   ├── test_markdown.py
 │   ├── test_bundle.py
-│   └── test_detector.py
+│   ├── test_detector.py
+│   ├── test_logging_config.py
+│   ├── test_query_api_spike.py
+│   ├── test_dependencies.py      ← import-resolution helpers (all languages)
+│   ├── test_base_queries.py      ← tree-sitter node helpers
+│   ├── test_sql_queries.py       ← SQL/PL/SQL extraction
+│   ├── test_java_queries.py      ← Java fallback + tree-sitter parsers
+│   └── test_cache_extended.py    ← IndexCache lifecycle & serialisation
 └── integration/
+    ├── test_cli.py
     ├── test_init_bundle.py
     └── test_incremental_indexing.py
 ```
@@ -771,7 +779,7 @@ pytest --snapshot-update                  # regenerate snapshots
 1. **Fork** the repo and create a feature branch: `git checkout -b feat/my-feature`
 2. **Make your changes** — see the module reference above for where things live
 3. **Write or update tests** — every new code path needs a test
-4. **Run the full suite:** `pytest --cov=repo_parser --cov-fail-under=80`
+4. **Run the full suite:** `pytest --cov=repo_parser --cov-fail-under=91`
 5. **Run against a real repo:** `repo-parser init /some/project --verbose`
 6. **Commit with a clear message** following the convention:
    - `feat(module): short description` for new features
@@ -814,5 +822,3 @@ pytest --snapshot-update                  # regenerate snapshots
 | Dependency inference | Only token-level matching (no import resolution) | Integration with language-specific package resolvers |
 | Binary detection | Reads first 8 KB for null-byte heuristic | Could use `libmagic` for accuracy |
 | Kubernetes detection | Only checks for `apiVersion` key | Could check `kind:` field for more accurate classification |
-
-See `docs/tree-sitter-query-api-evaluation.md` for the full tree-sitter migration analysis.
