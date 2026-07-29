@@ -7,9 +7,30 @@ on:
     branches: [main, dev]
 
 jobs:
+  # ── build verification ───────────────────────────────────────────────────
+  build:
+    name: Build & install check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build tooling
+        run: pip install build
+      - name: Build distribution
+        run: python -m build --sdist --wheel --outdir dist/
+      - name: Verify wheel installs cleanly
+        run: |
+          pip install dist/*.whl
+          repo-parser --help
+
+  # ── test matrix ─────────────────────────────────────────────────────────
   test:
+    name: Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
     steps:
@@ -19,5 +40,44 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies
         run: pip install -r requirements.txt -r requirements-dev.txt
-      - name: Run tests
-        run: pytest --cov=repo_parser --cov-report=term-missing --cov-fail-under=78
+      - name: Run tests with coverage
+        run: |
+          pytest \
+            --cov=repo_parser \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            --cov-fail-under=91 \
+            -v
+      - name: Upload coverage XML
+        if: matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 7
+
+  # ── coverage summary (3.12 only) ─────────────────────────────────────────
+  coverage:
+    name: Coverage report
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Generate HTML coverage report
+        run: |
+          pytest \
+            --cov=repo_parser \
+            --cov-report=html:htmlcov \
+            --cov-report=term-missing \
+            -q
+      - name: Upload HTML coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: htmlcov
+          path: htmlcov/
+          retention-days: 14

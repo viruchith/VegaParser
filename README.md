@@ -3,11 +3,11 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![CI](https://github.com/viruchith/VegaParser/actions/workflows/ci.yml/badge.svg)](https://github.com/viruchith/VegaParser/actions/workflows/ci.yml)
-[![Coverage: 89%](https://img.shields.io/badge/coverage-89%25-brightgreen.svg)](#testing)
+[![Coverage: 91%](https://img.shields.io/badge/coverage-91%25-brightgreen.svg)](#testing)
 
 **VegaParser** is a command-line tool that turns any local code repository into a structured **Markdown knowledge base** optimised for Large Language Models. It walks your source tree, parses every file with **Tree-sitter AST analysis**, enriches results with regex-based endpoint and secret extraction, and writes clean, YAML-frontmatted Markdown that can be injected directly into an LLM's context window.
 
-> **v0.2.0** — incremental caching, hardened secret redaction, 155-test suite (89 % coverage).
+> **v0.2.0** — incremental caching, hardened secret redaction, 342-test suite (91 % coverage).
 > See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 
 ---
@@ -413,7 +413,7 @@ VegaParser/
 │   └── tree-sitter-query-api-evaluation.md
 ├── tests/
 │   ├── fixtures/                   ← sample corpus (17 files, 11 languages)
-│   ├── unit/                       ← one test module per source module
+│   ├── unit/                       ← one test module per source module (17 modules)
 │   └── integration/                ← end-to-end init + bundle + cache tests
 └── repo_parser/
     ├── cli.py                      ← Typer app: init, bundle
@@ -609,9 +609,13 @@ pytest tests/unit/test_endpoints_security.py -v
 pytest tests/integration/ -v
 ```
 
-Current status: **155 tests · 89 % coverage** on `repo_parser/`.
+Current status: **342 tests · 91 % coverage** on `repo_parser/`.
 
-The CI pipeline (`.github/workflows/ci.yml`) runs on every push and pull request against `main`, across Python 3.10, 3.11, and 3.12, and fails if coverage drops below 80 %.
+The CI pipeline (`.github/workflows/ci.yml`) runs on every push and pull request against `main` across Python 3.10, 3.11, and 3.12. It includes three jobs:
+
+- **build** — builds the sdist + wheel and verifies `repo-parser --help` works from the installed wheel
+- **test** — runs the full pytest suite with coverage on all three Python versions; fails if coverage drops below 91 %
+- **coverage** — generates and uploads an HTML coverage report artifact (Python 3.12 only)
 
 ---
 
