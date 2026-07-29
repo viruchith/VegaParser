@@ -8,6 +8,15 @@ from typing import Optional
 
 import typer
 
+from repo_parser.cache import (
+    CACHE_VERSION,
+    build_filter_signature,
+    file_signature,
+    load_cache,
+    parsed_file_from_dict,
+    parsed_file_to_dict,
+    save_cache,
+)
 from repo_parser.generator.bundle import BUNDLE_FILENAME, BundleError, bundle_knowledge_base, bundle_stats
 from repo_parser.generator.markdown import MarkdownGenerator
 from repo_parser.parser.engine import ParserEngine
@@ -42,42 +51,62 @@ def _parse_files(
     from repo_parser.models import ParsedFile
 
     parsed_files: list[ParsedFile] = []
+    cached_files = {}
+    cache_payload = load_cache(scanner.root)
+    if cache_payload and cache_payload.get("version") == CACHE_VERSION and cache_payload.get("filter") == build_filter_signature(lang_filter, scanner.extensions):
+        cached_files = cache_payload.get("files", {})
 
-    for rel_path in files:
+    def _is_cache_hit(rel_path: Path) -> bool:
         rel_str = rel_path.as_posix()
-        progress_update(f"Parsing {truncate_filepath(rel_str)}…")
+        cached = cached_files.get(rel_str)
+        if not cached:
+            return False
+        try:
+            return cached.get("meta") == file_signature(scanner.root / rel_path)
+        except OSError:
+            return False
 
+    def _parse_one(rel_path: Path):
+        rel_str = rel_path.as_posix()
         content = scanner.read_file(rel_path)
         if content is None:
             logger.warning("Skipped unreadable file: %s", rel_str)
-            progress_update(advance=1)
-            continue
+            return None
 
         if lang_filter:
             detected = detect_language(rel_str)
             if detected not in lang_filter:
                 if not (detected == "yaml" and "kubernetes" in lang_filter):
                     logger.debug("Skipped by language filter: %s (%s)", rel_str, detected)
-                    progress_update(advance=1)
-                    continue
+                    return None
             if detected == "yaml" and "kubernetes" in lang_filter and "yaml" not in lang_filter:
                 result = engine.parse_file(rel_str, content)
-                if result is not None and result.language == "kubernetes":
-                    parsed_files.append(result)
-                    logger.debug("Parsed Kubernetes manifest: %s", rel_str)
-                elif result is None:
+                if result is not None and result.language != "kubernetes":
                     logger.debug("Skipped non-Kubernetes YAML: %s", rel_str)
-                progress_update(advance=1)
-                continue
+                    return None
+                return result
 
         result = engine.parse_file(rel_str, content)
+        if result is None:
+            logger.warning("Failed to parse or unsupported file: %s", rel_str)
+        return result
+
+    for rel_path in files:
+        rel_str = rel_path.as_posix()
+        progress_update(f"Processing {truncate_filepath(rel_str)}…")
+
+        if _is_cache_hit(rel_path):
+            logger.debug("Cache hit: %s", rel_str)
+            parsed_files.append(parsed_file_from_dict(cached_files[rel_str]["parsed"]))
+            progress_update(advance=1)
+            continue
+
+        result = _parse_one(rel_path)
         if result is not None:
             parsed_files.append(result)
-        else:
-            logger.warning("Failed to parse or unsupported file: %s", rel_str)
-
         progress_update(advance=1)
 
+    parsed_files.sort(key=lambda p: p.filepath)
     return parsed_files
 
 
@@ -132,6 +161,20 @@ def init(
 
         progress_update("Generating Markdown knowledge base…")
         engine.infer_internal_dependencies(parsed_files)
+        save_cache(
+            root,
+            {
+                "version": CACHE_VERSION,
+                "filter": build_filter_signature(lang_filter, extensions),
+                "files": {
+                    pf.filepath: {
+                        "meta": file_signature(root / pf.filepath),
+                        "parsed": parsed_file_to_dict(pf),
+                    }
+                    for pf in parsed_files
+                },
+            },
+        )
         generator = MarkdownGenerator(root)
         index_path = generator.generate(parsed_files)
         progress_update(advance=1)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from collections import Counter
@@ -17,12 +18,21 @@ logger = logging.getLogger(__name__)
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 
 
+_MAX_FILENAME_BYTES = 180  # Safe margin below the macOS 255-byte per-component limit
+
+
 def sanitize_filename(filepath: str) -> str:
     """Convert a repo-relative path to a safe markdown filename."""
     name = filepath.replace("\\", "/")
     name = re.sub(r"[^a-zA-Z0-9_./-]", "_", name)
     name = name.replace("/", "_").replace(".", "_")
-    return f"{name}.md"
+    stem = f"{name}.md"
+    if len(stem) > _MAX_FILENAME_BYTES:
+        # Truncate and append a short hash so filenames stay unique.
+        digest = hashlib.sha1(filepath.encode("utf-8")).hexdigest()[:12]
+        prefix_len = _MAX_FILENAME_BYTES - 17  # reserve "__" + 12-hex + ".md"
+        stem = f"{name[:prefix_len]}__{digest}.md"
+    return stem
 
 
 class MarkdownGenerator:

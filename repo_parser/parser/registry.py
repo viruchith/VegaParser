@@ -49,10 +49,10 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".hcl": "hcl",
     # SQL
     ".sql": "sql",
-    ".plsql": "sql",
-    ".pls": "sql",
-    ".pkb": "sql",
-    ".pks": "sql",
+    ".plsql": "plsql",
+    ".pls": "plsql",
+    ".pkb": "plsql",
+    ".pks": "plsql",
     # Docker
     ".dockerfile": "dockerfile",
 }

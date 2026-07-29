@@ -82,7 +82,12 @@ CLI bundle [PATH]
 - **Stateless per run.** Each `init` invocation is independent.
 - **In-memory aggregation:** `list[ParsedFile]` collected during traversal; passed to generator at end.
 - **Output:** `.rag_kb/modules/<sanitized_path>.md` + `.rag_kb/project_index.md`
-- **No database or cache** in v1.
+- **Incremental cache:** A per-repo manifest at `.rag_kb/.cache/manifest.json` maps each
+  source's relative path to a SHA-256 content hash and its serialized `ParsedFile`. On
+  subsequent `init` runs, files whose hash is unchanged (and whose module file still exists)
+  are restored from the cache instead of being re-parsed. Entries for deleted sources are
+  purged along with their generated module files. The `--force`/`--no-cache` flag bypasses
+  the cache and forces a full reparse.
 
 ## File Traversal Strategy
 
@@ -162,6 +167,12 @@ Runs on **all** parsed files after tree-sitter extraction. Regex-based, language
 6. **Driver strings** — `create_engine("…")`
 
 Passwords are redacted in output (`***`).
+
+### Known Limitations
+1. **Multi-line credentials**: Connection strings split across string concatenation are not detected or redacted.
+2. **F-string interpolation**: `f"postgres://{user}:{password}@host"` will not have credentials redacted.
+3. **Commented-out lines**: Lines starting with `#` are NOT excluded from extraction (deliberate).
+4. **False positives**: Variables with names containing `host`, `port`, etc. as substrings are not guaranteed to be excluded by all patterns.
 
 ## Markdown Generation
 

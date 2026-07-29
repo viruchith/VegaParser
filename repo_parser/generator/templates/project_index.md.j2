@@ -11,38 +11,41 @@ file_count: {{ file_count }}
 **Parsed files:** {{ file_count }}
 
 ## Tech Stack
+{%- if stack.python_packages %}
 
-{% if stack.python_packages %}
 ### Python Dependencies
-
-{% for pkg in stack.python_packages %}
+{% for pkg in stack.python_packages -%}
 - {{ pkg }}
-{% endfor %}
-{% endif %}
+{% endfor -%}
+{%- endif -%}
+{%- if stack.node_packages %}
 
-{% if stack.node_packages %}
 ### Node.js Dependencies
-
-{% for pkg in stack.node_packages %}
+{% for pkg in stack.node_packages -%}
 - {{ pkg }}
-{% endfor %}
-{% endif %}
+{% endfor -%}
+{%- endif -%}
+{%- if stack.go_modules %}
 
-{% if stack.go_modules %}
 ### Go Modules
-
-{% for mod in stack.go_modules %}
+{% for mod in stack.go_modules -%}
 - {{ mod }}
-{% endfor %}
-{% endif %}
+{% endfor -%}
+{%- endif -%}
+{%- if stack.rust_crates %}
 
-{% if stack.rust_crates %}
 ### Rust Crates
-
-{% for crate in stack.rust_crates %}
+{% for crate in stack.rust_crates -%}
 - {{ crate }}
-{% endfor %}
-{% endif %}
+{% endfor -%}
+{%- endif -%}
+{%- if stack.java_packages %}
+
+### Java / Spring Dependencies
+{% for pkg in stack.java_packages -%}
+- {{ pkg }}
+{% endfor -%}
+{%- endif %}
 
 ## Files by Language
 
@@ -90,10 +93,4 @@ The following internal dependencies were detected between parsed modules:
 | File | Language | Classes | Functions | KB Document |
 |------|----------|---------|-----------|-------------|
 {% for entry in file_index %}| `{{ entry.filepath }}` | {{ entry.language }} | {{ entry.class_count }} | {{ entry.function_count }} | [{{ entry.kb_name }}](modules/{{ entry.kb_name }}) |
-{% endfor %}
-
-## Quick Navigation
-
-{% for entry in file_index %}
-- [{{ entry.filepath }}](modules/{{ entry.kb_name }})
 {% endfor %}

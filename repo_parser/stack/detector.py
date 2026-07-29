@@ -4,9 +4,17 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+SPRING_KEYWORDS = frozenset({
+    "spring-boot", "spring-boot-starter", "spring-core", "spring-web",
+    "spring-data", "spring-security", "spring-cloud", "spring-kafka",
+    "spring-batch", "spring-context", "spring-beans",
+})
 
 
 def detect_stack(root: Path) -> dict[str, list[str]]:
@@ -16,6 +24,7 @@ def detect_stack(root: Path) -> dict[str, list[str]]:
         "node_packages": [],
         "go_modules": [],
         "rust_crates": [],
+        "java_packages": [],
         "other": [],
     }
 
@@ -39,7 +48,109 @@ def detect_stack(root: Path) -> dict[str, list[str]]:
     if cargo.is_file():
         stack["rust_crates"] = _parse_cargo_toml(cargo)
 
+    java_deps = _parse_maven_pom(root) + _parse_gradle_build(root)
+    if java_deps:
+        stack["java_packages"] = _dedupe_prioritize_spring(java_deps)
+
     return stack
+
+
+def _dedupe_prioritize_spring(deps: list[str]) -> list[str]:
+    seen: set[str] = set()
+    spring: list[str] = []
+    other: list[str] = []
+    for dep in deps:
+        if dep in seen:
+            continue
+        seen.add(dep)
+        if any(kw in dep.lower() for kw in SPRING_KEYWORDS):
+            spring.append(dep)
+        else:
+            other.append(dep)
+    return spring[:40] + other[:40]
+
+
+def _parse_maven_pom(root: Path) -> list[str]:
+    """Parse pom.xml from root and common Maven module paths."""
+    deps: list[str] = []
+    pom_paths = [root / "pom.xml"]
+    pom_paths.extend(root.glob("*/pom.xml"))
+    pom_paths.extend(root.glob("**/pom.xml"))
+    seen_paths: set[str] = set()
+
+    for pom in pom_paths[:10]:
+        path_key = str(pom.resolve())
+        if path_key in seen_paths:
+            continue
+        seen_paths.add(path_key)
+        deps.extend(_parse_single_pom(pom))
+
+    return deps
+
+
+def _parse_single_pom(path: Path) -> list[str]:
+    packages: list[str] = []
+    try:
+        tree = ET.parse(path)
+        root_el = tree.getroot()
+        ns = ""
+        if root_el.tag.startswith("{"):
+            ns = root_el.tag.split("}")[0] + "}"
+
+        for dep in root_el.iter(f"{ns}dependency"):
+            group = dep.find(f"{ns}groupId")
+            artifact = dep.find(f"{ns}artifactId")
+            if group is not None and artifact is not None and group.text and artifact.text:
+                coord = f"{group.text}:{artifact.text}"
+                packages.append(coord)
+
+        # Spring Boot parent
+        parent = root_el.find(f"{ns}parent")
+        if parent is not None:
+            pg = parent.find(f"{ns}groupId")
+            pa = parent.find(f"{ns}artifactId")
+            if pg is not None and pa is not None and pg.text and pa.text:
+                packages.append(f"{pg.text}:{pa.text} (parent)")
+    except (ET.ParseError, OSError) as exc:
+        logger.warning("Could not parse %s: %s", path, exc)
+    return packages
+
+
+def _parse_gradle_build(root: Path) -> list[str]:
+    """Parse build.gradle / build.gradle.kts for dependencies."""
+    deps: list[str] = []
+    gradle_files = [
+        root / "build.gradle",
+        root / "build.gradle.kts",
+        root / "settings.gradle",
+    ]
+    gradle_files.extend(root.glob("**/build.gradle"))
+    gradle_files.extend(root.glob("**/build.gradle.kts"))
+
+    dep_pattern = re.compile(
+        r"""(?:implementation|api|compile|runtimeOnly|testImplementation)\s*[\(\s]['"]([^'"]+)['"]""",
+    )
+    coord_pattern = re.compile(
+        r"""['"]([a-zA-Z0-9_.-]+:[a-zA-Z0-9_.-]+(?::[a-zA-Z0-9_.-]+)?)['"]""",
+    )
+
+    seen_files: set[str] = set()
+    for gf in gradle_files[:10]:
+        key = str(gf.resolve())
+        if key in seen_files or not gf.is_file():
+            continue
+        seen_files.add(key)
+        try:
+            text = gf.read_text(encoding="utf-8", errors="replace")
+            for match in dep_pattern.finditer(text):
+                deps.append(match.group(1))
+            for match in coord_pattern.finditer(text):
+                coord = match.group(1)
+                if ":" in coord and coord not in deps:
+                    deps.append(coord)
+        except OSError as exc:
+            logger.warning("Could not read %s: %s", gf, exc)
+    return deps
 
 
 def _parse_requirements(path: Path) -> list[str]:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from repo_parser.models import ExternalCall, FunctionInfo, ParsedFile
-from repo_parser.parser.queries.base import iter_nodes, line_end, line_number, node_kind, node_text
+from repo_parser.parser.queries.base import iter_nodes, line_end, line_number, node_kind, node_text, parse_root
 
 SHELL_FUNCTION_KINDS = ("function_definition", "command_name")
 
@@ -31,8 +31,7 @@ EXTERNAL_PATTERNS = [
 
 
 def parse_shell(filepath: str, source: str, parser, lang_name: str = "bash") -> ParsedFile:
-    tree = parser.parse(source)
-    root = tree.root_node()
+    _tree, root = parse_root(parser, source)
 
     parsed = ParsedFile(filepath=filepath, language=lang_name)
 
@@ -43,8 +42,8 @@ def parse_shell(filepath: str, source: str, parser, lang_name: str = "bash") -> 
             FunctionInfo(
                 name=func_name,
                 signature=node_text(source, node).split("{")[0].strip()[:120],
-                line_start=line_number(node),
-                line_end=line_end(node),
+                line_start=line_number(source, node),
+                line_end=line_end(source, node),
             )
         )
         parsed.exports.append(func_name)

@@ -7,6 +7,14 @@ venv/
 dist/
 build/
 
+# Testing
+.pytest_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
 # Output
 .rag_kb/
 repo-parser.log
