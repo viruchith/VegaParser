@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import shutil
 import statistics
@@ -16,6 +17,16 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MAIN_PY = REPO_ROOT / "main.py"
 DEFAULT_WORKSPACE = Path.home() / ".cache" / "vegaparser-benchmarks"
+
+
+def _ts() -> str:
+    """Return a compact local timestamp string: HH:MM:SS."""
+    return datetime.datetime.now().strftime("%H:%M:%S")
+
+
+def _iso() -> str:
+    """Return an ISO-8601 local timestamp suitable for JSON output."""
+    return datetime.datetime.now().isoformat(timespec="seconds")
 
 
 @dataclass(frozen=True)
@@ -98,20 +109,20 @@ def ensure_repo(target: BenchmarkTarget, workspace: Path, refresh: bool = False,
     path = clone_path(workspace, target)
     if refresh and path.exists():
         if verbose:
-            print(f"  - removing existing clone: {path}", flush=True)
+            print(f"  [{_ts()}] removing existing clone: {path}", flush=True)
         shutil.rmtree(path)
     if path.exists() and not repo_exists(path):
         if verbose:
-            print(f"  - removing partial clone: {path}", flush=True)
+            print(f"  [{_ts()}] removing partial clone: {path}", flush=True)
         shutil.rmtree(path)
     if repo_exists(path):
         if verbose:
-            print(f"  - using existing clone: {path}", flush=True)
+            print(f"  [{_ts()}] using existing clone: {path}", flush=True)
         return path
 
     path.parent.mkdir(parents=True, exist_ok=True)
     if verbose:
-        print(f"  - cloning {target.repo} -> {path}", flush=True)
+        print(f"  [{_ts()}] cloning {target.repo} -> {path}", flush=True)
     cmd = [
         "git",
         "-c",
@@ -178,6 +189,7 @@ def run_target(
     refresh: bool,
     verbose: bool = False,
 ) -> dict:
+    target_started_at = _iso()
     try:
         repo_path = ensure_repo(target, workspace, refresh=refresh, verbose=verbose)
     except Exception as exc:
@@ -194,6 +206,8 @@ def run_target(
             "cold_max_s": None,
             "warm_s": None,
             "workspace": "",
+            "started_at": target_started_at,
+            "finished_at": _iso(),
         }
 
     cold_times: list[float] = []
@@ -203,7 +217,7 @@ def run_target(
 
     for run_no in range(1, repeat + 1):
         if verbose:
-            print(f"  - cold run {run_no}/{repeat}", flush=True)
+            print(f"  [{_ts()}] cold run {run_no}/{repeat} started", flush=True)
         clear_generated_outputs(repo_path)
         result = run_vegaparser(repo_path, target.languages)
         cold_times.append(result.duration_seconds)
@@ -211,7 +225,8 @@ def run_target(
         last_rc = result.returncode
         if verbose:
             print(
-                f"    completed in {result.duration_seconds:.2f}s (modules={module_count}, rc={last_rc})",
+                f"  [{_ts()}] cold run {run_no}/{repeat} finished in {result.duration_seconds:.2f}s"
+                f" (modules={module_count}, rc={last_rc})",
                 flush=True,
             )
         if last_rc != 0:
@@ -223,14 +238,15 @@ def run_target(
     warm_seconds = None
     if warm and last_rc == 0:
         if verbose:
-            print("  - warm run", flush=True)
+            print(f"  [{_ts()}] warm run started", flush=True)
         result = run_vegaparser(repo_path, target.languages)
         warm_seconds = result.duration_seconds
         module_count = result.module_count
         last_rc = result.returncode
         if verbose:
             print(
-                f"    completed in {result.duration_seconds:.2f}s (modules={module_count}, rc={last_rc})",
+                f"  [{_ts()}] warm run finished in {result.duration_seconds:.2f}s"
+                f" (modules={module_count}, rc={last_rc})",
                 flush=True,
             )
         if last_rc != 0:
@@ -251,6 +267,8 @@ def run_target(
         "cold_max_s": max(cold_times) if cold_times else None,
         "warm_s": warm_seconds,
         "workspace": str(repo_path),
+        "started_at": target_started_at,
+        "finished_at": _iso(),
     }
 
 
@@ -342,13 +360,16 @@ def main() -> int:
 
     args.workspace.mkdir(parents=True, exist_ok=True)
     total = len(selected)
+    suite_start = time.perf_counter()
+    suite_started_at = _ts()
     print(
-        f"Running {total} benchmark target(s) (repeat={max(1, args.repeat)}, warm={args.warm}, refresh={args.refresh})",
+        f"[{suite_started_at}] Starting benchmark: {total} target(s)"
+        f" (repeat={max(1, args.repeat)}, warm={args.warm}, refresh={args.refresh})",
         flush=True,
     )
     results: list[dict] = []
     for idx, target in enumerate(selected, start=1):
-        print(f"[{idx}/{total}] {target.id} ({target.tier})", flush=True)
+        print(f"[{_ts()}] [{idx}/{total}] {target.id} ({target.tier}) started", flush=True)
         result = run_target(
             target,
             args.workspace,
@@ -359,11 +380,20 @@ def main() -> int:
         )
         results.append(result)
         print(
-            f"  -> {result['status']} | cold_avg={format_seconds_with_unit(result['cold_avg_s'])} | warm={format_seconds_with_unit(result['warm_s'])} | modules={result['modules']}",
+            f"[{_ts()}] [{idx}/{total}] {target.id} done"
+            f" | {result['status']}"
+            f" | cold_avg={format_seconds_with_unit(result['cold_avg_s'])}"
+            f" | warm={format_seconds_with_unit(result['warm_s'])}"
+            f" | modules={result['modules']}",
             flush=True,
         )
 
-    print("\nSummary", flush=True)
+    suite_elapsed = time.perf_counter() - suite_start
+    print(
+        f"\n[{_ts()}] Benchmark finished in {suite_elapsed:.2f}s total\n",
+        flush=True,
+    )
+    print("Summary", flush=True)
     print_table(results)
 
     if args.json_path:
