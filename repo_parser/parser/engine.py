@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
+from dataclasses import asdict
 import logging
 from threading import local
 
 from tree_sitter_language_pack import get_parser, has_language
 
+from repo_parser.cache import _dict_to_parsed_file
 from repo_parser.models import ParsedFile
+from repo_parser.parser.dependencies import infer_internal_dependencies as infer_file_dependencies
 from repo_parser.parser.extractors.endpoints import enrich_parsed_file
 from repo_parser.parser.queries.common_queries import PROFILES, parse_common
 from repo_parser.parser.queries.docker_queries import parse_dockerfile
@@ -26,6 +31,31 @@ logger = logging.getLogger(__name__)
 
 def _make_common(lang: str):
     return lambda fp, src, parser: parse_common(fp, src, parser, lang)
+
+
+def _grammar_for_language(lang_name: str) -> str:
+    if lang_name == "kubernetes":
+        return "yaml"
+    if lang_name == "plsql":
+        return "sql"
+    if lang_name == "shell":
+        return "bash"
+    return lang_name
+
+
+def _parse_file_isolated(filepath: str, source: str, lang_name: str) -> dict | None:
+    parser_fn = PARSERS.get(lang_name)
+    if parser_fn is None:
+        return None
+    grammar = _grammar_for_language(lang_name)
+    if not has_language(grammar):
+        return None
+    parser = ParserAdapter(get_parser(grammar))
+    result = parser_fn(filepath, source, parser)
+    if result is None:
+        return None
+    enrich_parsed_file(result, source)
+    return asdict(result)
 
 
 PARSERS = {
@@ -94,7 +124,7 @@ class ParserEngine:
             return None
 
         # Config-only parsers don't need tree-sitter
-        if lang_name in ("env", "properties", "ini", "java"):
+        if lang_name in ("env", "properties", "ini", "java", "sql", "plsql"):
             try:
                 result = parser_fn(filepath, source, None)
                 return result
@@ -102,33 +132,10 @@ class ParserEngine:
                 logger.error("Failed to parse config file %s: %s", filepath, exc)
                 return None
 
-        parser = self._get_parser(lang_name)
-        if parser is None:
-            return None
-
-        try:
-            result = parser_fn(filepath, source, parser)
-            if result is not None:
-                enrich_parsed_file(result, source)
-                logger.debug(
-                    "Parsed %s [%s]: %d classes, %d functions",
-                    filepath,
-                    lang_name,
-                    len(result.classes),
-                    len(result.functions),
-                )
-            else:
-                logger.warning("No parse result for %s (%s)", filepath, lang_name)
-            return result
-        except Exception as exc:
-            logger.error(
-                "Failed to parse %s (%s): %s",
-                filepath,
-                lang_name,
-                exc,
-                exc_info=logger.isEnabledFor(logging.DEBUG),
-            )
-            return None
+        result = self._parse_with_isolation(filepath, source, lang_name)
+        if result is None:
+            logger.warning("No parse result for %s (%s)", filepath, lang_name)
+        return result
 
     def infer_internal_dependencies(self, parsed_files: list[ParsedFile]) -> None:
         """Link import statements to internal module paths where possible."""
