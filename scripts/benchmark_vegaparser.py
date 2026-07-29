@@ -114,6 +114,8 @@ def ensure_repo(target: BenchmarkTarget, workspace: Path, refresh: bool = False,
         print(f"  - cloning {target.repo} -> {path}", flush=True)
     cmd = [
         "git",
+        "-c",
+        "core.longpaths=true",
         "clone",
         "--depth",
         "1",

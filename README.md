@@ -462,6 +462,8 @@ Use the benchmark runner to measure VegaParser across curated heavy/light open-s
 - Python 3.10+
 - `git` available on PATH
 - Enough disk/network capacity for cloned benchmark repos (heavy targets can be very large)
+- On Windows, Git long paths should be enabled; if you still hit checkout limits, point
+  `--workspace` at a short path such as `C:\vegaparser-bench`.
 
 ### Quick commands
 
