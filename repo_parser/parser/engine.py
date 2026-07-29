@@ -12,6 +12,7 @@ from tree_sitter_language_pack import get_parser, has_language
 
 from repo_parser.cache import _dict_to_parsed_file
 from repo_parser.models import ParsedFile
+from repo_parser.parser.ts_compat import ParserAdapter
 from repo_parser.parser.dependencies import infer_internal_dependencies as infer_file_dependencies
 from repo_parser.parser.extractors.endpoints import enrich_parsed_file
 from repo_parser.parser.queries.common_queries import PROFILES, parse_common
@@ -43,7 +44,7 @@ def _grammar_for_language(lang_name: str) -> str:
     return lang_name
 
 
-def _parse_file_isolated(filepath: str, source: str, lang_name: str) -> dict | None:
+def _parse_file_isolated(filepath: str, source: str, lang_name: str) -> ParsedFile | None:
     parser_fn = PARSERS.get(lang_name)
     if parser_fn is None:
         return None
@@ -51,11 +52,18 @@ def _parse_file_isolated(filepath: str, source: str, lang_name: str) -> dict | N
     if not has_language(grammar):
         return None
     parser = ParserAdapter(get_parser(grammar))
-    result = parser_fn(filepath, source, parser)
+    try:
+        result = parser_fn(filepath, source, parser)
+    except Exception as exc:
+        logger.error("Parser failed for %s (%s): %s", filepath, lang_name, exc)
+        return None
     if result is None:
         return None
-    enrich_parsed_file(result, source)
-    return asdict(result)
+    try:
+        enrich_parsed_file(result, source)
+    except Exception as exc:
+        logger.error("Failed to enrich %s: %s", filepath, exc)
+    return result
 
 
 PARSERS = {
@@ -132,7 +140,7 @@ class ParserEngine:
                 logger.error("Failed to parse config file %s: %s", filepath, exc)
                 return None
 
-        result = self._parse_with_isolation(filepath, source, lang_name)
+        result = _parse_file_isolated(filepath, source, lang_name)
         if result is None:
             logger.warning("No parse result for %s (%s)", filepath, lang_name)
         return result

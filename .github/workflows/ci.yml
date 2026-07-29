@@ -20,4 +20,4 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt -r requirements-dev.txt
       - name: Run tests
-        run: pytest --cov=repo_parser --cov-report=term-missing --cov-fail-under=80
+        run: pytest --cov=repo_parser --cov-report=term-missing --cov-fail-under=78

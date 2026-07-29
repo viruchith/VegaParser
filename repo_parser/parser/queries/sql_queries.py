@@ -64,6 +64,23 @@ CREATE_TABLE_NAME_RE = re.compile(
 )
 
 
+def _extract_sql_fallback(source: str, parsed: ParsedFile) -> None:
+    """Extract SQL statements using regex fallback when tree-sitter is unavailable."""
+    seen_stmts: set[str] = set()
+    for pattern, label in SQL_FALLBACK_PATTERNS:
+        for match in pattern.finditer(source):
+            stmt = match.group(0).strip()[:200]
+            key = f"{label}:{match.start()}"
+            if key in seen_stmts:
+                continue
+            seen_stmts.add(key)
+            line = source[:match.start()].count("\n") + 1
+            parsed.functions.append(
+                FunctionInfo(name=label, signature=stmt, line_start=line, line_end=line)
+            )
+            parsed.exports.append(label)
+
+
 def _detect_plsql(source: str) -> bool:
     score = 0
     for pattern, _ in PLSQL_PATTERNS:
@@ -92,11 +109,6 @@ def _extract_plsql_objects(source: str, parsed: ParsedFile) -> None:
                 )
             )
             parsed.exports.append(f"{obj_type} {name}")
-
-
-def parse_sql(filepath: str, source: str, parser) -> ParsedFile:
-    _tree, root = parse_root(parser, source)
-
 
 def parse_sql(filepath: str, source: str, parser) -> ParsedFile:
     is_plsql = _detect_plsql(source) or filepath.lower().endswith((".plsql", ".pls", ".pkb", ".pks"))

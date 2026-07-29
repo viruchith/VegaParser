@@ -43,6 +43,14 @@ class NodeAdapter:
     def byte_range(self) -> _ByteRange:
         return _ByteRange(self._node.start_byte, self._node.end_byte)
 
+    @property
+    def start_byte(self) -> int:
+        return self._node.start_byte
+
+    @property
+    def end_byte(self) -> int:
+        return self._node.end_byte
+
     def start_position(self):
         return self._node.start_point
 
