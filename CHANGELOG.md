@@ -23,6 +23,8 @@ Versions follow [Semantic Versioning](https://semver.org/).
   - representative targets now complete with non-zero module counts (for example:
     `python-light=37`, `php-light=217`, `java-light=85`)
   - benchmark runs no longer report pervasive false `modules=0` due to parser crashes.
+- Fixed Windows benchmark checkout failures on repos with very deep paths by cloning with
+  `core.longpaths=true`.
 - Fixed `OSError [Errno 63] File name too long` crash on repos with deeply-nested paths (e.g.
   JetBrains/kotlin): `sanitize_filename` now truncates long stems to ≤180 bytes and appends a
   12-hex-char SHA-1 suffix to preserve uniqueness.
