@@ -622,6 +622,8 @@ The `warm_s` column in the result table and JSON captures this timing.
 - `warm_s`: warm-cache timing (`--warm`) — `null` when not requested
 - `modules`: number of module markdown files generated
 - `status`: `ok`, `clone failed: …`, `cold run failed`, `warm run failed`, `interrupted` (Ctrl+C mid-run), `cancelled` (never started after Ctrl+C), or `exit <rc>`
+- `artifact_rag_kb`: target-specific snapshot path to generated `.rag_kb` (when present)
+- `artifact_log`: target-specific snapshot path to `repo-parser.log` (when present)
 
 ### Recommended workflow for reliable comparisons
 
@@ -633,6 +635,8 @@ The `warm_s` column in the result table and JSON captures this timing.
 ### Notes
 
 - By default, repositories are cloned and reused in `~/.cache/vegaparser-benchmarks/`.
+- Each target writes a snapshot to `~/.cache/vegaparser-benchmarks/.benchmark-artifacts/<target-id>/`
+  so shared-repo targets keep independent `.rag_kb` outputs for later quality analysis.
 - A single target failing clone/parse does **not** abort the whole suite; status is recorded per target.
 - For quick local checks, prefer a small subset (`--repo` or `--language`) before full heavy runs.
 - Use `--workers` to speed up suites with many light targets; avoid very high worker counts on

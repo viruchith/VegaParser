@@ -152,7 +152,7 @@ SUITE: list[BenchmarkTarget] = [
     BenchmarkTarget("terraform-heavy", "https://github.com/hashicorp/terraform", "heavy", ("terraform", "hcl"), "Terraform/HCL heavy repo"),
     BenchmarkTarget("terraform-light", "https://github.com/terraform-aws-modules/terraform-aws-vpc", "light", ("terraform", "hcl"), "Popular Terraform module"),
     BenchmarkTarget("dockerfile-heavy", "https://github.com/moby/moby", "heavy", ("dockerfile",), "Large Docker codebase"),
-    BenchmarkTarget("dockerfile-light", "https://github.com/docker-library/hello-world", "light", ("dockerfile",), "Small Dockerfile repo"),
+    BenchmarkTarget("dockerfile-light", "https://github.com/docker/getting-started", "light", ("dockerfile",), "Small Dockerfile repo"),
     BenchmarkTarget("bash-heavy", "https://github.com/ohmyzsh/ohmyzsh", "heavy", ("bash", "shell"), "Large shell-script repo"),
     BenchmarkTarget("bash-light", "https://github.com/junegunn/fzf", "light", ("bash", "shell"), "Popular shell integration repo"),
     BenchmarkTarget("sql-heavy", "https://github.com/dbt-labs/dbt-core", "heavy", ("sql",), "SQL-centric analytics repo"),
@@ -171,6 +171,10 @@ def slug_from_repo(repo_url: str) -> str:
 
 def clone_path(workspace: Path, target: BenchmarkTarget) -> Path:
     return workspace / slug_from_repo(target.repo)
+
+
+def artifact_path(workspace: Path, target: BenchmarkTarget) -> Path:
+    return workspace / ".benchmark-artifacts" / target.id
 
 
 def repo_exists(path: Path) -> bool:
@@ -259,6 +263,40 @@ def run_vegaparser(repo_path: Path, languages: tuple[str, ...]) -> RunResult:
     )
 
 
+def snapshot_target_outputs(
+    repo_path: Path,
+    workspace: Path,
+    target: BenchmarkTarget,
+    *,
+    verbose: bool,
+) -> tuple[str, str]:
+    """Copy benchmark artifacts to a target-specific snapshot directory."""
+    target_dir = artifact_path(workspace, target)
+    if target_dir.exists():
+        shutil.rmtree(target_dir, ignore_errors=True)
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    rag_source = repo_path / ".rag_kb"
+    rag_snapshot = target_dir / ".rag_kb"
+    if rag_source.is_dir():
+        shutil.copytree(rag_source, rag_snapshot)
+        rag_snapshot_str = str(rag_snapshot)
+    else:
+        rag_snapshot_str = ""
+
+    log_source = repo_path / "repo-parser.log"
+    log_snapshot = target_dir / "repo-parser.log"
+    if log_source.is_file():
+        shutil.copy2(log_source, log_snapshot)
+        log_snapshot_str = str(log_snapshot)
+    else:
+        log_snapshot_str = ""
+
+    if verbose:
+        _log(f"artifact snapshot: {target_dir}", indent=1, prefix=target.id)
+    return rag_snapshot_str, log_snapshot_str
+
+
 def _cancelled_result(target: BenchmarkTarget, started_at: str) -> dict:
     return {
         "id": target.id,
@@ -273,6 +311,8 @@ def _cancelled_result(target: BenchmarkTarget, started_at: str) -> dict:
         "cold_max_s": None,
         "warm_s": None,
         "workspace": "",
+        "artifact_rag_kb": "",
+        "artifact_log": "",
         "started_at": started_at,
         "finished_at": _iso(),
     }
@@ -316,6 +356,8 @@ def run_target(
                 "cold_max_s": None,
                 "warm_s": None,
                 "workspace": "",
+                "artifact_rag_kb": "",
+                "artifact_log": "",
                 "started_at": target_started_at,
                 "finished_at": _iso(),
             }
@@ -374,6 +416,9 @@ def run_target(
         if shutdown is not None and shutdown.is_set() and not last_error and len(cold_times) < repeat:
             last_error = "interrupted"
         status = "ok" if last_rc == 0 and not last_error else last_error or f"exit {last_rc}"
+        artifact_rag_kb, artifact_log = snapshot_target_outputs(
+            repo_path, workspace, target, verbose=verbose
+        )
 
         return {
             "id": target.id,
@@ -388,6 +433,8 @@ def run_target(
             "cold_max_s": max(cold_times) if cold_times else None,
             "warm_s": warm_seconds,
             "workspace": str(repo_path),
+            "artifact_rag_kb": artifact_rag_kb,
+            "artifact_log": artifact_log,
             "started_at": target_started_at,
             "finished_at": _iso(),
         }

@@ -27,6 +27,32 @@ INSTRUCTION_LABELS = {
 
 
 def parse_dockerfile(filepath: str, source: str, parser) -> ParsedFile:
+    if parser is None:
+        parsed = ParsedFile(filepath=filepath, language="dockerfile")
+        instructions: list[str] = []
+        for idx, line in enumerate(source.splitlines(), start=1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            op = stripped.split(maxsplit=1)[0].upper()
+            if op not in INSTRUCTION_LABELS.values():
+                continue
+            instructions.append(stripped)
+            parsed.functions.append(
+                FunctionInfo(
+                    name=op,
+                    signature=stripped,
+                    line_start=idx,
+                    line_end=idx,
+                )
+            )
+            parsed.exports.append(op)
+            if op == "FROM":
+                parsed.imports.append(stripped)
+        if instructions:
+            parsed.module_docstring = "Dockerfile build instructions:\n" + "\n".join(instructions[:20])
+        return parsed
+
     _tree, root = parse_root(parser, source)
 
     parsed = ParsedFile(filepath=filepath, language="dockerfile")

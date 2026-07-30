@@ -175,7 +175,9 @@ class RepositoryScanner:
         suffix = path.suffix.lower()
         if suffix in self.extensions:
             return True
-        if path.name.lower() in SPECIAL_FILENAMES and "dockerfile" in self.extensions:
+        if path.name.lower() in SPECIAL_FILENAMES and (
+            "dockerfile" in self.extensions or ".dockerfile" in self.extensions
+        ):
             return True
         return False
 

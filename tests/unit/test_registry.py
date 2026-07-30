@@ -43,6 +43,7 @@ def test_extensions_for_languages():
     assert extensions_for_languages({"go"}) == {".go"}
     combined = extensions_for_languages({"python", "go"})
     assert {".py", ".pyw", ".go"} <= combined
+    assert {".properties", ".ini", ".cfg"} <= extensions_for_languages({"env", "properties", "ini"})
 
 
 def test_extensions_for_languages_unknown_returns_none():
@@ -56,4 +57,5 @@ def test_normalize_language_filter_normalizes_aliases():
         "go",
     }
     assert normalize_language_filter("c#,cpp") == {"csharp", "cpp"}
+    assert normalize_language_filter("env,properties,ini") == {"env", "properties", "ini"}
     assert normalize_language_filter("") == set()

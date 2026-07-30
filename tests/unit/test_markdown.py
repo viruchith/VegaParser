@@ -74,3 +74,18 @@ def test_project_index_frontmatter_is_valid_yaml(tmp_path):
     data = _extract_frontmatter(index_path.read_text(encoding="utf-8"))
     assert data["file_count"] == 2
     assert data["generated_by"] == "vegaparser"
+
+
+def test_generate_disambiguates_colliding_module_filenames(tmp_path):
+    generator = MarkdownGenerator(tmp_path)
+    files = [
+        ParsedFile(filepath="a/b_c.py", language="python"),
+        ParsedFile(filepath="a_b/c.py", language="python"),
+    ]
+    generator.generate(files)
+
+    modules = sorted((tmp_path / ".rag_kb" / "modules").glob("*.md"))
+    assert len(modules) == 2
+    names = {m.name for m in modules}
+    assert "a_b_c_py.md" in names
+    assert any(name.startswith("a_b_c_py__") and name.endswith(".md") for name in names)

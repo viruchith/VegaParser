@@ -37,6 +37,17 @@ Versions follow [Semantic Versioning](https://semver.org/).
   `subprocess rm -rf`, which is immune to the fd-based traversal issue that trips Python 3.14's
   `_rmtree_safe_fd` on `.rag_kb` directories containing over-long filenames written before the
   `sanitize_filename` fix.
+- Fixed language-filter normalization for config targets: `properties` and `ini` are no longer
+  collapsed into `env`, so `--languages env,properties,ini` correctly includes `.env`, `.properties`,
+  `.ini`, and `.cfg` files.
+- Added per-target benchmark artifact snapshots under `.benchmark-artifacts/<target-id>/` so
+  targets that share the same cloned repository (for example `go-heavy` and `yaml-heavy`) keep
+  independent `.rag_kb` outputs and logs for post-run quality analysis.
+
+#### Knowledge base output integrity
+- Fixed rare `.rag_kb/modules` filename collisions when two distinct source paths sanitized to the
+  same markdown name (for example `a/b_c.py` vs `a_b/c.py`): module filenames are now automatically
+  disambiguated with a deterministic short hash suffix.
 
 ### Added
 

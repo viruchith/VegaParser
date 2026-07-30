@@ -110,8 +110,8 @@ LANGUAGE_ALIASES: dict[str, str] = {
     "shell": "bash",
     "sh": "bash",
     "env": "env",
-    "properties": "env",
-    "ini": "env",
+    "properties": "properties",
+    "ini": "ini",
 }
 
 

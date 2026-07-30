@@ -74,6 +74,14 @@ def _parse_file_isolated(filepath: str, source: str, lang_name: str) -> ParsedFi
         return None
     grammar = _grammar_for_language(lang_name)
     if not has_language(grammar):
+        if lang_name == "dockerfile":
+            # Some environments do not ship the tree-sitter Dockerfile grammar.
+            # Fall back to a lightweight line parser so benchmark/config outputs
+            # still include Dockerfile modules.
+            try:
+                return parser_fn(filepath, source, None)
+            except Exception as exc:
+                logger.error("Parser failed for %s (%s): %s", filepath, lang_name, exc)
         return None
     parser = _get_ts_parser(grammar)
     try:
