@@ -29,6 +29,13 @@ def _iso() -> str:
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 
+def _log(message: str, *, indent: int = 0, stderr: bool = False) -> None:
+    """Print a benchmark log line with a timestamp prefix."""
+    stream = sys.stderr if stderr else sys.stdout
+    padding = "  " * max(indent, 0)
+    print(f"{padding}[{_ts()}] {message}", file=stream, flush=True)
+
+
 @dataclass(frozen=True)
 class BenchmarkTarget:
     id: str
@@ -109,20 +116,20 @@ def ensure_repo(target: BenchmarkTarget, workspace: Path, refresh: bool = False,
     path = clone_path(workspace, target)
     if refresh and path.exists():
         if verbose:
-            print(f"  [{_ts()}] removing existing clone: {path}", flush=True)
+            _log(f"removing existing clone: {path}", indent=1)
         shutil.rmtree(path)
     if path.exists() and not repo_exists(path):
         if verbose:
-            print(f"  [{_ts()}] removing partial clone: {path}", flush=True)
+            _log(f"removing partial clone: {path}", indent=1)
         shutil.rmtree(path)
     if repo_exists(path):
         if verbose:
-            print(f"  [{_ts()}] using existing clone: {path}", flush=True)
+            _log(f"using existing clone: {path}", indent=1)
         return path
 
     path.parent.mkdir(parents=True, exist_ok=True)
     if verbose:
-        print(f"  [{_ts()}] cloning {target.repo} -> {path}", flush=True)
+        _log(f"cloning {target.repo} -> {path}", indent=1)
     cmd = [
         "git",
         "-c",
@@ -217,42 +224,42 @@ def run_target(
 
     for run_no in range(1, repeat + 1):
         if verbose:
-            print(f"  [{_ts()}] cold run {run_no}/{repeat} started", flush=True)
+            _log(f"cold run {run_no}/{repeat} started", indent=1)
         clear_generated_outputs(repo_path)
         result = run_vegaparser(repo_path, target.languages)
         cold_times.append(result.duration_seconds)
         module_count = result.module_count
         last_rc = result.returncode
         if verbose:
-            print(
-                f"  [{_ts()}] cold run {run_no}/{repeat} finished in {result.duration_seconds:.2f}s"
+            _log(
+                f"cold run {run_no}/{repeat} finished in {result.duration_seconds:.2f}s"
                 f" (modules={module_count}, rc={last_rc})",
-                flush=True,
+                indent=1,
             )
         if last_rc != 0:
             last_error = "cold run failed"
             if result.stderr_tail:
-                print(result.stderr_tail, file=sys.stderr, flush=True)
+                _log(result.stderr_tail, stderr=True)
             break
 
     warm_seconds = None
     if warm and last_rc == 0:
         if verbose:
-            print(f"  [{_ts()}] warm run started", flush=True)
+            _log("warm run started", indent=1)
         result = run_vegaparser(repo_path, target.languages)
         warm_seconds = result.duration_seconds
         module_count = result.module_count
         last_rc = result.returncode
         if verbose:
-            print(
-                f"  [{_ts()}] warm run finished in {result.duration_seconds:.2f}s"
+            _log(
+                f"warm run finished in {result.duration_seconds:.2f}s"
                 f" (modules={module_count}, rc={last_rc})",
-                flush=True,
+                indent=1,
             )
         if last_rc != 0:
             last_error = "warm run failed"
             if result.stderr_tail:
-                print(result.stderr_tail, file=sys.stderr, flush=True)
+                _log(result.stderr_tail, stderr=True)
 
     return {
         "id": target.id,
@@ -287,7 +294,7 @@ def short_text(value: str, limit: int = 80) -> str:
     return value if len(value) <= limit else value[: limit - 3] + "..."
 
 
-def print_table(rows: list[dict]) -> None:
+def _table_lines(rows: list[dict]) -> list[str]:
     headers = ["id", "tier", "languages", "cold_avg_s", "warm_s", "modules", "status"]
     widths = {header: len(header) for header in headers}
     for row in rows:
@@ -302,10 +309,9 @@ def print_table(rows: list[dict]) -> None:
     def line(values: list[str]) -> str:
         return "  ".join(value.ljust(widths[header]) for value, header in zip(values, headers))
 
-    print(line(headers))
-    print("  ".join("-" * widths[h] for h in headers))
+    lines = [line(headers), "  ".join("-" * widths[h] for h in headers)]
     for row in rows:
-        print(
+        lines.append(
             line(
                 [
                     row["id"],
@@ -318,6 +324,12 @@ def print_table(rows: list[dict]) -> None:
                 ]
             )
         )
+    return lines
+
+
+def print_table(rows: list[dict]) -> None:
+    for line in _table_lines(rows):
+        print(line)
 
 
 def parse_args() -> argparse.Namespace:
@@ -355,21 +367,19 @@ def main() -> int:
         return 0
 
     if not selected:
-        print("No benchmark targets matched the provided filters.", file=sys.stderr)
+        _log("No benchmark targets matched the provided filters.", stderr=True)
         return 2
 
     args.workspace.mkdir(parents=True, exist_ok=True)
     total = len(selected)
     suite_start = time.perf_counter()
-    suite_started_at = _ts()
-    print(
-        f"[{suite_started_at}] Starting benchmark: {total} target(s)"
-        f" (repeat={max(1, args.repeat)}, warm={args.warm}, refresh={args.refresh})",
-        flush=True,
+    _log(
+        f"Starting benchmark: {total} target(s)"
+        f" (repeat={max(1, args.repeat)}, warm={args.warm}, refresh={args.refresh})"
     )
     results: list[dict] = []
     for idx, target in enumerate(selected, start=1):
-        print(f"[{_ts()}] [{idx}/{total}] {target.id} ({target.tier}) started", flush=True)
+        _log(f"[{idx}/{total}] {target.id} ({target.tier}) started")
         result = run_target(
             target,
             args.workspace,
@@ -379,22 +389,24 @@ def main() -> int:
             verbose=args.verbose,
         )
         results.append(result)
-        print(
-            f"[{_ts()}] [{idx}/{total}] {target.id} done"
+        _log(
+            f"[{idx}/{total}] {target.id} done"
             f" | {result['status']}"
             f" | cold_avg={format_seconds_with_unit(result['cold_avg_s'])}"
             f" | warm={format_seconds_with_unit(result['warm_s'])}"
-            f" | modules={result['modules']}",
-            flush=True,
+            f" | modules={result['modules']}"
         )
 
     suite_elapsed = time.perf_counter() - suite_start
-    print(
-        f"\n[{_ts()}] Benchmark finished in {suite_elapsed:.2f}s total\n",
-        flush=True,
-    )
-    print("Summary", flush=True)
-    print_table(results)
+    _log(f"Benchmark finished in {suite_elapsed:.2f}s total")
+    if args.verbose:
+        _log("Summary")
+        for line in _table_lines(results):
+            _log(line)
+    else:
+        print()
+        print("Summary", flush=True)
+        print_table(results)
 
     if args.json_path:
         args.json_path.parent.mkdir(parents=True, exist_ok=True)

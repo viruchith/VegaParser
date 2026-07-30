@@ -54,6 +54,7 @@ Versions follow [Semantic Versioning](https://semver.org/).
   - final summary table
 - Added `--verbose` for detailed step logs (clone/cache actions, per-run timings, and failure stderr tail).
 - Enhanced benchmark timing visibility: logs now include start/finish timestamps for the full benchmark run, each target, and each verbose cold/warm test pass.
+- Fixed verbose benchmark logging consistency: every benchmark CLI line is now timestamped, including clone/cache steps, per-run lifecycle lines, summary headings/rows, and error output paths.
 
 #### Benchmark baseline results
 - Full-suite cold benchmark (`42` targets, `repeat=1`, `warm=False`) now completes end-to-end with
