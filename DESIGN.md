@@ -51,7 +51,7 @@ vegaparser/
     ├── ui/
     │   ├── console.py              # Shared Rich Console
     │   ├── progress.py             # Discovery spinner + parsing progress bar
-    │   └── logging_config.py       # File-only logging (repo-parser.log)
+    │   └── logging_config.py       # Configurable file/console logging
     └── stack/
         ├── __init__.py
         └── detector.py             # requirements.txt, package.json, etc.
@@ -81,21 +81,20 @@ CLI bundle [PATH]
 - **Stateless per run.** Each `init` invocation is independent.
 - **In-memory aggregation:** `list[ParsedFile]` collected during traversal; passed to generator at end.
 - **Output:** `.rag_kb/modules/<sanitized_path>.md` + `.rag_kb/project_index.md`
-- **Incremental cache:** A per-repo manifest at `.rag_kb/.cache/manifest.json` maps each
-  source's relative path to a SHA-256 content hash and its serialized `ParsedFile`. On
-  subsequent `init` runs, files whose hash is unchanged (and whose module file still exists)
-  are restored from the cache instead of being re-parsed. Entries for deleted sources are
-  purged along with their generated module files. The `--force`/`--no-cache` flag bypasses
-  the cache and forces a full reparse.
+- **Incremental cache:** A per-repo payload at `.rag_kb/parse_cache.json` stores
+  `version`, `filter`, and `files`. Each file entry contains a cheap stat signature
+  (`mtime_ns`, `size`) plus serialized `ParsedFile` data. On subsequent `init` runs,
+  unchanged files are restored from cache instead of being re-parsed.
 
 ## File Traversal Strategy
 
 1. Resolve root path (default: cwd).
 2. Load `.gitignore` from root via `pathspec.PathSpec`.
-3. Skip hidden/package directories (`.git`, `node_modules`, `venv`, `.rag_kb`, …).
-4. Skip binary files (null-byte heuristic + extension blocklist).
-5. Only include files where `detect_language()` returns a supported language.
-6. Filter by `--languages` flag when provided (including `kubernetes` → `.yaml` files).
+3. Prune hidden/package directories (`.git`, `node_modules`, `venv`, `.rag_kb`, …) during `os.walk`.
+4. Skip unsupported files early using language detection and extension filters.
+5. Skip files larger than `MAX_FILE_BYTES` (512 KB).
+6. Skip binary files (null-byte heuristic + extension blocklist).
+7. Keep files where `detect_language()` returns a supported language and optional `--languages` filter matches (including `kubernetes` → `.yaml` files).
 
 ### Special filenames
 
@@ -119,11 +118,12 @@ See `repo_parser/parser/registry.py` for the full mapping. Highlights:
 | `.tf`, `.hcl` | terraform / hcl |
 | `.sql`, `.plsql` | sql (→ plsql via heuristics) |
 | `.sh`, `.bash` | bash |
-| `.env`, `.properties`, `.ini` | env |
+| `.env`, `.properties`, `.ini` | env / properties / ini |
 
 ## Tree-sitter Parsing Strategy
 
-Parsing uses `tree-sitter-language-pack` with **AST node traversal** (not the Query API) due to binding compatibility across Python versions.
+Parsing uses `tree-sitter-language-pack` with **AST node traversal** (not the Query API).
+Parser instances are cached per thread to support safe parallel parsing with `repo-parser init --workers`.
 
 ### Shared node helpers (`base.py`)
 
@@ -193,7 +193,7 @@ YAML frontmatter plus sections: Overview, Imports, Classes, Functions, External 
 ## CLI Interface
 
 ```bash
-python main.py init [PATH] [--languages python,kubernetes,env] [--verbose]
+python main.py init [PATH] [--languages python,kubernetes,env] [--workers 0] [--verbose]
 python main.py bundle [PATH] [--output full_repo_context.md] [--verbose]
 # or after pip install -e .:
 repo-parser init [PATH] [OPTIONS]
@@ -210,9 +210,22 @@ repo-parser bundle [PATH] [OPTIONS]
 
 ### Logging
 
-- All logs written to `repo-parser.log` in the current working directory
-- No stdout logging (preserves Rich progress bar rendering)
-- `--verbose` sets file log level to `DEBUG`; default is `INFO`
+- `setup_logging()` supports `file`, `console`, or `both` targets
+- `repo-parser` CLI defaults to file logging (`repo-parser.log`) to preserve Rich progress output
+- Log lines include timestamp, level, logger name, and message
+- `--verbose` sets log level to `DEBUG`; default is `INFO`
+
+## Benchmark Orchestration (`scripts/benchmark_vegaparser.py`)
+
+- Single central script for the full benchmark suite (42 targets)
+- Parallel target execution via `--workers`
+- Heavy-target concurrency control via `--max-heavy-workers`
+- Timestamped benchmark log lines across all output levels
+- Graceful `Ctrl+C` handling: shutdown event, task draining, `cancelled` status for unfinished targets
+- Per-target artifact snapshots under `.benchmark-artifacts/<target-id>/`:
+  - `.rag_kb/`
+  - `repo-parser.log`
+- JSON output includes `artifact_rag_kb` and `artifact_log` paths for quality audits
 
 ## Error Handling
 

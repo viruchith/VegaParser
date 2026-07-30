@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
@@ -47,6 +49,7 @@ def _parse_files(
     engine: ParserEngine,
     lang_filter: set[str] | None,
     progress_update,
+    workers: int = 1,
 ) -> list:
     from repo_parser.models import ParsedFile
 
@@ -91,20 +94,38 @@ def _parse_files(
             logger.warning("Failed to parse or unsupported file: %s", rel_str)
         return result
 
-    for rel_path in files:
+    def _process_one(rel_path: Path):
+        """Cache-aware wrapper: return cached result or freshly parse the file."""
         rel_str = rel_path.as_posix()
-        progress_update(f"Processing {truncate_filepath(rel_str)}…")
-
         if _is_cache_hit(rel_path):
             logger.debug("Cache hit: %s", rel_str)
-            parsed_files.append(parsed_file_from_dict(cached_files[rel_str]["parsed"]))
-            progress_update(advance=1)
-            continue
+            return parsed_file_from_dict(cached_files[rel_str]["parsed"])
+        return _parse_one(rel_path)
 
-        result = _parse_one(rel_path)
-        if result is not None:
-            parsed_files.append(result)
-        progress_update(advance=1)
+    if workers <= 1:
+        # Sequential path — preserves original progress display behaviour.
+        for rel_path in files:
+            rel_str = rel_path.as_posix()
+            progress_update(f"Processing {truncate_filepath(rel_str)}…")
+            result = _process_one(rel_path)
+            if result is not None:
+                parsed_files.append(result)
+            progress_update(advance=1)
+    else:
+        # Parallel path — Rich Progress.update() is thread-safe.
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_path = {executor.submit(_process_one, fp): fp for fp in files}
+            for future in as_completed(future_to_path):
+                rel_path = future_to_path[future]
+                progress_update(f"Processing {truncate_filepath(rel_path.as_posix())}…")
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    logger.error("Worker failed on %s: %s", rel_path, exc)
+                    result = None
+                if result is not None:
+                    parsed_files.append(result)
+                progress_update(advance=1)
 
     parsed_files.sort(key=lambda p: p.filepath)
     return parsed_files
@@ -126,6 +147,16 @@ def init(
         "-l",
         help="Comma-separated languages to parse (e.g. python,javascript).",
     ),
+    workers: int = typer.Option(
+        0,
+        "--workers",
+        "-j",
+        help=(
+            "Parallel file-parse workers. "
+            "0 = auto (min(CPU count, 8)); 1 = sequential (default behaviour)."
+        ),
+        min=0,
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug file logging."),
 ) -> None:
     """Initialize parsing and generate the .rag_kb knowledge base."""
@@ -139,7 +170,8 @@ def init(
         extensions = extensions_for_languages(lang_filter)
         logger.info("Language filter: %s", ", ".join(sorted(lang_filter)))
 
-    logger.info("Starting init scan at %s", root)
+    effective_workers = workers if workers > 0 else min(os.cpu_count() or 4, 8)
+    logger.info("Starting init scan at %s (workers=%d)", root, effective_workers)
     scanner = RepositoryScanner(root, languages=lang_filter, extensions=extensions)
 
     files = run_with_spinner(
@@ -157,7 +189,7 @@ def init(
     total_steps = len(files) + 1
 
     with parsing_progress(total_steps, "Parsing repository files…") as progress_update:
-        parsed_files = _parse_files(scanner, files, engine, lang_filter, progress_update)
+        parsed_files = _parse_files(scanner, files, engine, lang_filter, progress_update, workers=effective_workers)
 
         progress_update("Generating Markdown knowledge base…")
         engine.infer_internal_dependencies(parsed_files)

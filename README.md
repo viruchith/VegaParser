@@ -487,6 +487,9 @@ python scripts/benchmark_vegaparser.py \
 
 # Save machine-readable output
 python scripts/benchmark_vegaparser.py --json benchmark-results.json
+
+# Run all light targets using 4 parallel workers
+python scripts/benchmark_vegaparser.py --tier light --workers 4
 ```
 
 ### Example runs
@@ -517,6 +520,17 @@ python scripts/benchmark_vegaparser.py \
   --workspace /tmp/vegaparser-bench \
   --tier light \
   --json /tmp/vegaparser-bench/light.json
+
+# 6) Run all light targets in parallel with 5 workers and save results
+python scripts/benchmark_vegaparser.py \
+  --tier light \
+  --workers 5 \
+  --json results/light-parallel.json
+
+# 7) Interrupt-safe full suite run (Ctrl+C writes partial results)
+python scripts/benchmark_vegaparser.py \
+  --workers 4 \
+  --json results/full-run.json
 ```
 
 ### Common options
@@ -532,6 +546,38 @@ python scripts/benchmark_vegaparser.py \
 | `--workspace <path>` | Custom clone/cache directory (default: `~/.cache/vegaparser-benchmarks`) |
 | `--json <file>` | Export full results as JSON |
 | `--verbose` | Print detailed step-by-step progress logs during clone and runs |
+| `--workers <n>` | Run up to `n` targets in parallel (default: `1`) |
+| `--max-heavy-workers <n>` | Cap concurrent `heavy` targets when running in parallel (default: `2`) |
+
+### Parallel execution
+
+Use `--workers N` to run multiple benchmark targets concurrently (one thread per target, each
+spawning its own VegaParser subprocess):
+
+```bash
+# Run light-tier targets 5 at a time
+python scripts/benchmark_vegaparser.py --tier light --workers 5
+
+# Run heavy targets 2 at a time with verbose per-target logs
+python scripts/benchmark_vegaparser.py --tier heavy --workers 2 --verbose
+
+# Use 6 total workers but cap heavy repos to 2 concurrent parsers
+python scripts/benchmark_vegaparser.py --workers 6 --max-heavy-workers 2 --verbose
+```
+
+Each worker prefixes its log lines with `[target-id]` so interleaved output is always
+attributable. The final summary table is always printed in original suite order regardless
+of completion order.
+
+Targets that resolve to the same clone path (for example `go-heavy` and `yaml-heavy`, both
+using `kubernetes/kubernetes`) are automatically serialized with a repository lock so they
+cannot delete each other's `.rag_kb` state during parallel runs.
+
+**Graceful Ctrl+C:** pressing Ctrl+C at any point sets a shared shutdown signal:
+- In-flight workers finish their current run and exit with `status=interrupted`.
+- Pending tasks that have not yet started are recorded as `status=cancelled`.
+- A partial summary table is printed and `--json` output is written before exit.
+- Exit code is `1` on interrupt, `0` on clean completion.
 
 ### Cold vs warm runs
 
@@ -575,7 +621,9 @@ The `warm_s` column in the result table and JSON captures this timing.
 - `cold_min_s` / `cold_max_s`: spread across cold runs (only meaningful when `--repeat` > 1)
 - `warm_s`: warm-cache timing (`--warm`) — `null` when not requested
 - `modules`: number of module markdown files generated
-- `status`: `ok`, clone failure, parse failure, or other error
+- `status`: `ok`, `clone failed: …`, `cold run failed`, `warm run failed`, `interrupted` (Ctrl+C mid-run), `cancelled` (never started after Ctrl+C), or `exit <rc>`
+- `artifact_rag_kb`: target-specific snapshot path to generated `.rag_kb` (when present)
+- `artifact_log`: target-specific snapshot path to `repo-parser.log` (when present)
 
 ### Recommended workflow for reliable comparisons
 
@@ -587,8 +635,12 @@ The `warm_s` column in the result table and JSON captures this timing.
 ### Notes
 
 - By default, repositories are cloned and reused in `~/.cache/vegaparser-benchmarks/`.
+- Each target writes a snapshot to `~/.cache/vegaparser-benchmarks/.benchmark-artifacts/<target-id>/`
+  so shared-repo targets keep independent `.rag_kb` outputs for later quality analysis.
 - A single target failing clone/parse does **not** abort the whole suite; status is recorded per target.
 - For quick local checks, prefer a small subset (`--repo` or `--language`) before full heavy runs.
+- Use `--workers` to speed up suites with many light targets; avoid very high worker counts on
+  heavy repos since each worker runs a VegaParser subprocess that can be CPU/IO intensive.
 
 ---
 

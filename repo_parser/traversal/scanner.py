@@ -32,6 +32,11 @@ SKIP_DIRS = {
     "*.egg-info",
 }
 
+# Files larger than this are skipped — they are typically auto-generated,
+# minified, or protobuf-compiled artifacts that add parse time without
+# improving RAG quality.
+MAX_FILE_BYTES: int = 512 * 1024  # 512 KB
+
 BINARY_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".gif", ".ico", ".bmp", ".webp",
     ".pdf", ".zip", ".tar", ".gz", ".bz2", ".7z", ".rar",
@@ -131,6 +136,19 @@ class RepositoryScanner:
                     logger.debug("Skipped unsupported or filtered file: %s", rel_posix)
                     continue
 
+                # Fast stat-based size gate — avoids reading/binary-sniffing
+                # huge auto-generated files (protos, minified JS, etc.).
+                try:
+                    if path.stat().st_size > MAX_FILE_BYTES:
+                        logger.debug(
+                            "Skipped oversized file (%d bytes): %s",
+                            path.stat().st_size,
+                            rel_posix,
+                        )
+                        continue
+                except OSError:
+                    continue
+
                 if _is_binary(path):
                     logger.debug("Skipped binary file: %s", rel_posix)
                     continue
@@ -157,7 +175,9 @@ class RepositoryScanner:
         suffix = path.suffix.lower()
         if suffix in self.extensions:
             return True
-        if path.name.lower() in SPECIAL_FILENAMES and "dockerfile" in self.extensions:
+        if path.name.lower() in SPECIAL_FILENAMES and (
+            "dockerfile" in self.extensions or ".dockerfile" in self.extensions
+        ):
             return True
         return False
 

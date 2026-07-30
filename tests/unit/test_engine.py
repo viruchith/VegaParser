@@ -172,6 +172,16 @@ def test_parse_file_config_exception_returns_none(engine, monkeypatch):
     assert engine.parse_file(".env", "KEY=value") is None
 
 
+def test_parse_file_dockerfile_falls_back_when_grammar_missing(engine, monkeypatch):
+    import repo_parser.parser.engine as engine_mod
+
+    monkeypatch.setattr(engine_mod, "has_language", lambda _: False)
+    result = engine.parse_file("Dockerfile", "FROM python:3.12\nRUN echo hi\n")
+    assert result is not None
+    assert result.language == "dockerfile"
+    assert any(fn.name == "FROM" for fn in result.functions)
+
+
 # ── ParserEngine._resolve_relative ──────────────────────────────────────────
 
 
