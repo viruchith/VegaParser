@@ -29,6 +29,12 @@ from repo_parser.parser.registry import detect_language
 
 logger = logging.getLogger(__name__)
 
+# Thread-local storage for per-thread parser caches.  Each worker thread keeps
+# its own dict of grammar → ParserAdapter so parsers are never shared across
+# threads (tree-sitter parsers are NOT thread-safe) yet are reused across the
+# many files a single worker processes.
+_parser_tls = local()
+
 
 def _make_common(lang: str):
     return lambda fp, src, parser: parse_common(fp, src, parser, lang)
@@ -44,6 +50,24 @@ def _grammar_for_language(lang_name: str) -> str:
     return lang_name
 
 
+def _get_ts_parser(grammar: str) -> ParserAdapter:
+    """Return a thread-local cached ParserAdapter for *grammar*.
+
+    Each worker thread maintains its own grammar → ParserAdapter dict so
+    parsers are never shared concurrently while still being reused across the
+    many files each thread processes.
+    """
+    cache = getattr(_parser_tls, "parsers", None)
+    if cache is None:
+        cache = {}
+        _parser_tls.parsers = cache
+    p = cache.get(grammar)
+    if p is None:
+        p = ParserAdapter(get_parser(grammar))
+        cache[grammar] = p
+    return p
+
+
 def _parse_file_isolated(filepath: str, source: str, lang_name: str) -> ParsedFile | None:
     parser_fn = PARSERS.get(lang_name)
     if parser_fn is None:
@@ -51,7 +75,7 @@ def _parse_file_isolated(filepath: str, source: str, lang_name: str) -> ParsedFi
     grammar = _grammar_for_language(lang_name)
     if not has_language(grammar):
         return None
-    parser = ParserAdapter(get_parser(grammar))
+    parser = _get_ts_parser(grammar)
     try:
         result = parser_fn(filepath, source, parser)
     except Exception as exc:

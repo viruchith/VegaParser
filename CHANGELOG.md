@@ -38,6 +38,30 @@ Versions follow [Semantic Versioning](https://semver.org/).
   `_rmtree_safe_fd` on `.rag_kb` directories containing over-long filenames written before the
   `sanitize_filename` fix.
 
+### Added
+
+#### Parallel file parsing (`--workers` / `-j`)
+- Added `--workers N` (`-j N`) option to the `init` command:
+  - `0` (default) auto-selects `min(CPU count, 8)` workers.
+  - `1` preserves the original sequential behaviour.
+  - Values `> 1` dispatch each file to a `ThreadPoolExecutor` worker so multiple files are parsed
+    concurrently; tree-sitter C extensions release the GIL during `parser.parse()`, yielding real
+    multi-core throughput.
+- Thread-local parser cache in `_parse_file_isolated`: each worker thread now reuses its own
+  `grammar → ParserAdapter` dict instead of constructing a fresh `ParserAdapter(get_parser(…))`
+  for every file, eliminating repeated language-pack lookups.
+- Increased `lru_cache` sizes for `_encode` / `_newline_offsets` in `base.py` from `maxsize=4`
+  to `maxsize=32` so the caches stay warm when multiple worker threads process files simultaneously.
+
+#### File-size gate
+- Added `MAX_FILE_BYTES = 512 KB` constant in `RepositoryScanner`:
+  - Files larger than this limit (auto-generated proto outputs, minified assets, huge vendored
+    sources) are skipped during discovery via a cheap `stat().st_size` check — before any content
+    is read or binary-sniffed.
+  - This dramatically reduces parse time on repos like `rust-lang/rust`, `dotnet/runtime`, and
+    `kubernetes/kubernetes` that contain large generated files.
+  - Skipped files are logged at `DEBUG` level.
+
 ### Changed
 
 #### Benchmark guide
