@@ -55,6 +55,7 @@ Versions follow [Semantic Versioning](https://semver.org/).
 - Added `--verbose` for detailed step logs (clone/cache actions, per-run timings, and failure stderr tail).
 - Enhanced benchmark timing visibility: logs now include start/finish timestamps for the full benchmark run, each target, and each verbose cold/warm test pass.
 - Fixed verbose benchmark logging consistency: every benchmark CLI line is now timestamped, including clone/cache steps, per-run lifecycle lines, summary headings/rows, and error output paths.
+
 #### Parallel benchmark execution
 - Added `--workers N` flag to `scripts/benchmark_vegaparser.py` to run up to N benchmark targets concurrently using `ThreadPoolExecutor`.
   - Each worker logs to the central script via a thread-safe `_log()` helper with a `[target-id]` prefix so interleaved output is always attributable.
