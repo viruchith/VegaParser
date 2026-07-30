@@ -37,6 +37,41 @@ Versions follow [Semantic Versioning](https://semver.org/).
   `subprocess rm -rf`, which is immune to the fd-based traversal issue that trips Python 3.14's
   `_rmtree_safe_fd` on `.rag_kb` directories containing over-long filenames written before the
   `sanitize_filename` fix.
+- Fixed language-filter normalization for config targets: `properties` and `ini` are no longer
+  collapsed into `env`, so `--languages env,properties,ini` correctly includes `.env`, `.properties`,
+  `.ini`, and `.cfg` files.
+- Added per-target benchmark artifact snapshots under `.benchmark-artifacts/<target-id>/` so
+  targets that share the same cloned repository (for example `go-heavy` and `yaml-heavy`) keep
+  independent `.rag_kb` outputs and logs for post-run quality analysis.
+
+#### Knowledge base output integrity
+- Fixed rare `.rag_kb/modules` filename collisions when two distinct source paths sanitized to the
+  same markdown name (for example `a/b_c.py` vs `a_b/c.py`): module filenames are now automatically
+  disambiguated with a deterministic short hash suffix.
+
+### Added
+
+#### Parallel file parsing (`--workers` / `-j`)
+- Added `--workers N` (`-j N`) option to the `init` command:
+  - `0` (default) auto-selects `min(CPU count, 8)` workers.
+  - `1` preserves the original sequential behaviour.
+  - Values `> 1` dispatch each file to a `ThreadPoolExecutor` worker so multiple files are parsed
+    concurrently; tree-sitter C extensions release the GIL during `parser.parse()`, yielding real
+    multi-core throughput.
+- Thread-local parser cache in `_parse_file_isolated`: each worker thread now reuses its own
+  `grammar → ParserAdapter` dict instead of constructing a fresh `ParserAdapter(get_parser(…))`
+  for every file, eliminating repeated language-pack lookups.
+- Increased `lru_cache` sizes for `_encode` / `_newline_offsets` in `base.py` from `maxsize=4`
+  to `maxsize=32` so the caches stay warm when multiple worker threads process files simultaneously.
+
+#### File-size gate
+- Added `MAX_FILE_BYTES = 512 KB` constant in `RepositoryScanner`:
+  - Files larger than this limit (auto-generated proto outputs, minified assets, huge vendored
+    sources) are skipped during discovery via a cheap `stat().st_size` check — before any content
+    is read or binary-sniffed.
+  - This dramatically reduces parse time on repos like `rust-lang/rust`, `dotnet/runtime`, and
+    `kubernetes/kubernetes` that contain large generated files.
+  - Skipped files are logged at `DEBUG` level.
 
 ### Changed
 
@@ -55,6 +90,23 @@ Versions follow [Semantic Versioning](https://semver.org/).
 - Added `--verbose` for detailed step logs (clone/cache actions, per-run timings, and failure stderr tail).
 - Enhanced benchmark timing visibility: logs now include start/finish timestamps for the full benchmark run, each target, and each verbose cold/warm test pass.
 - Fixed verbose benchmark logging consistency: every benchmark CLI line is now timestamped, including clone/cache steps, per-run lifecycle lines, summary headings/rows, and error output paths.
+
+#### Parallel benchmark execution
+- Added `--workers N` flag to `scripts/benchmark_vegaparser.py` to run up to N benchmark targets concurrently using `ThreadPoolExecutor`.
+  - Each worker logs to the central script via a thread-safe `_log()` helper with a `[target-id]` prefix so interleaved output is always attributable.
+  - Suite banner now shows the active worker count: `Starting benchmark: N target(s) (workers=W, ...)`.
+  - A `Submitted N task(s) across W worker(s)` line is emitted once all tasks are queued.
+  - Completion order reflects wall-clock finish time; final summary table is always in original suite order.
+- Hardened parallel execution for shared repositories and heavy-target contention:
+  - Added per-repository path locks so targets sharing one clone (for example `go-heavy` and `yaml-heavy`) cannot race on `.rag_kb` cleanup.
+  - Added `--max-heavy-workers` (default `2`) to cap concurrent heavy runs even when `--workers` is higher.
+  - Benchmark banner now reports both `workers` and effective `heavy_workers` values.
+- Added graceful Ctrl+C (SIGINT) shutdown:
+  - The main thread catches `KeyboardInterrupt`, sets a shared `threading.Event`, and cancels pending futures.
+  - In-flight workers observe the event at run boundaries and exit early with `status=interrupted`.
+  - Tasks that never started are recorded as `status=cancelled`.
+  - A partial summary table is printed and results are written to JSON if `--json` was supplied.
+  - Exit code is `1` on interrupt, `0` on clean completion.
 
 #### Benchmark baseline results
 - Full-suite cold benchmark (`42` targets, `repeat=1`, `warm=False`) now completes end-to-end with

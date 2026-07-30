@@ -7,12 +7,12 @@ from collections.abc import Iterator
 from functools import lru_cache
 
 
-@lru_cache(maxsize=4)
+@lru_cache(maxsize=32)
 def _encode(source: str) -> bytes:
     return source.encode("utf-8")
 
 
-@lru_cache(maxsize=4)
+@lru_cache(maxsize=32)
 def _newline_offsets(source: str) -> tuple[int, ...]:
     source_bytes = _encode(source)
     offsets: list[int] = []

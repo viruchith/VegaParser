@@ -35,6 +35,15 @@ def sanitize_filename(filepath: str) -> str:
     return stem
 
 
+def _with_hash_suffix(stem: str, filepath: str) -> str:
+    """Append a short hash to *stem* while respecting filesystem limits."""
+    digest = hashlib.sha1(filepath.encode("utf-8")).hexdigest()[:12]
+    base = stem[:-3] if stem.endswith(".md") else stem
+    if len(base) + 17 > _MAX_FILENAME_BYTES:  # "__" + 12-hex + ".md"
+        base = base[: _MAX_FILENAME_BYTES - 17]
+    return f"{base}__{digest}.md"
+
+
 class MarkdownGenerator:
     """Write .rag_kb module files and project index."""
 
@@ -54,9 +63,10 @@ class MarkdownGenerator:
 
         module_template = self.env.get_template("module.md.j2")
         index_template = self.env.get_template("project_index.md.j2")
+        kb_name_map = self._build_kb_name_map(parsed_files)
 
         for pf in parsed_files:
-            kb_name = sanitize_filename(pf.filepath)
+            kb_name = kb_name_map[pf.filepath]
             out_path = self.modules_dir / kb_name
             content = module_template.render(
                 filepath=pf.filepath,
@@ -74,11 +84,30 @@ class MarkdownGenerator:
             out_path.write_text(content, encoding="utf-8")
             logger.debug("Wrote %s", out_path)
 
-        index_path = self._write_project_index(parsed_files, index_template)
+        index_path = self._write_project_index(parsed_files, index_template, kb_name_map)
         logger.info("Knowledge base written to %s", self.output_dir)
         return index_path
 
-    def _write_project_index(self, parsed_files: list[ParsedFile], template) -> Path:
+    def _build_kb_name_map(self, parsed_files: list[ParsedFile]) -> dict[str, str]:
+        """Return filepath -> unique markdown filename mapping."""
+        kb_name_map: dict[str, str] = {}
+        used_names: set[str] = set()
+
+        for pf in sorted(parsed_files, key=lambda p: p.filepath):
+            kb_name = sanitize_filename(pf.filepath)
+            if kb_name in used_names:
+                kb_name = _with_hash_suffix(kb_name, pf.filepath)
+            used_names.add(kb_name)
+            kb_name_map[pf.filepath] = kb_name
+
+        return kb_name_map
+
+    def _write_project_index(
+        self,
+        parsed_files: list[ParsedFile],
+        template,
+        kb_name_map: dict[str, str],
+    ) -> Path:
         language_counts = Counter(pf.language for pf in parsed_files)
 
         dependency_edges = []
@@ -88,7 +117,7 @@ class MarkdownGenerator:
 
         file_index = []
         for pf in sorted(parsed_files, key=lambda p: p.filepath):
-            kb_name = sanitize_filename(pf.filepath)
+            kb_name = kb_name_map[pf.filepath]
             file_index.append(
                 {
                     "filepath": pf.filepath,

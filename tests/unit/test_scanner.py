@@ -76,6 +76,15 @@ def test_special_filename_handling(tmp_path):
     assert ".env.production" in names
 
 
+def test_dockerfile_language_filter_includes_extensionless_dockerfile(tmp_path):
+    _write(tmp_path / "Dockerfile", "FROM python:3.12\n")
+    _write(tmp_path / "main.py")
+
+    names = _discovered_names(tmp_path, languages={"dockerfile"}, extensions={".dockerfile"})
+    assert "Dockerfile" in names
+    assert "main.py" not in names
+
+
 def test_is_binary_by_extension(tmp_path):
     for ext in [".png", ".zip", ".exe"]:
         assert ext in BINARY_EXTENSIONS
