@@ -55,6 +55,18 @@ Versions follow [Semantic Versioning](https://semver.org/).
 - Added `--verbose` for detailed step logs (clone/cache actions, per-run timings, and failure stderr tail).
 - Enhanced benchmark timing visibility: logs now include start/finish timestamps for the full benchmark run, each target, and each verbose cold/warm test pass.
 - Fixed verbose benchmark logging consistency: every benchmark CLI line is now timestamped, including clone/cache steps, per-run lifecycle lines, summary headings/rows, and error output paths.
+#### Parallel benchmark execution
+- Added `--workers N` flag to `scripts/benchmark_vegaparser.py` to run up to N benchmark targets concurrently using `ThreadPoolExecutor`.
+  - Each worker logs to the central script via a thread-safe `_log()` helper with a `[target-id]` prefix so interleaved output is always attributable.
+  - Suite banner now shows the active worker count: `Starting benchmark: N target(s) (workers=W, ...)`.
+  - A `Submitted N task(s) across W worker(s)` line is emitted once all tasks are queued.
+  - Completion order reflects wall-clock finish time; final summary table is always in original suite order.
+- Added graceful Ctrl+C (SIGINT) shutdown:
+  - The main thread catches `KeyboardInterrupt`, sets a shared `threading.Event`, and cancels pending futures.
+  - In-flight workers observe the event at run boundaries and exit early with `status=interrupted`.
+  - Tasks that never started are recorded as `status=cancelled`.
+  - A partial summary table is printed and results are written to JSON if `--json` was supplied.
+  - Exit code is `1` on interrupt, `0` on clean completion.
 
 #### Benchmark baseline results
 - Full-suite cold benchmark (`42` targets, `repeat=1`, `warm=False`) now completes end-to-end with

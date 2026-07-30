@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """Benchmark VegaParser on a curated set of popular GitHub repositories."""
 
 from __future__ import annotations
@@ -10,13 +10,18 @@ import shutil
 import statistics
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MAIN_PY = REPO_ROOT / "main.py"
 DEFAULT_WORKSPACE = Path.home() / ".cache" / "vegaparser-benchmarks"
+
+# Serialises all log output so parallel workers do not interleave lines.
+_log_lock = threading.Lock()
 
 
 def _ts() -> str:
@@ -29,11 +34,13 @@ def _iso() -> str:
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 
-def _log(message: str, *, indent: int = 0, stderr: bool = False) -> None:
-    """Print a benchmark log line with a timestamp prefix."""
+def _log(message: str, *, indent: int = 0, prefix: str = "", stderr: bool = False) -> None:
+    """Print a timestamped benchmark log line; thread-safe."""
     stream = sys.stderr if stderr else sys.stdout
     padding = "  " * max(indent, 0)
-    print(f"{padding}[{_ts()}] {message}", file=stream, flush=True)
+    tag = f"[{prefix}] " if prefix else ""
+    with _log_lock:
+        print(f"{padding}[{_ts()}] {tag}{message}", file=stream, flush=True)
 
 
 @dataclass(frozen=True)
@@ -112,24 +119,33 @@ def repo_exists(path: Path) -> bool:
     return (path / ".git").is_dir()
 
 
-def ensure_repo(target: BenchmarkTarget, workspace: Path, refresh: bool = False, verbose: bool = False) -> Path:
+def ensure_repo(
+    target: BenchmarkTarget,
+    workspace: Path,
+    refresh: bool = False,
+    verbose: bool = False,
+    shutdown: threading.Event | None = None,
+) -> Path:
     path = clone_path(workspace, target)
     if refresh and path.exists():
         if verbose:
-            _log(f"removing existing clone: {path}", indent=1)
+            _log(f"removing existing clone: {path}", indent=1, prefix=target.id)
         shutil.rmtree(path)
     if path.exists() and not repo_exists(path):
         if verbose:
-            _log(f"removing partial clone: {path}", indent=1)
+            _log(f"removing partial clone: {path}", indent=1, prefix=target.id)
         shutil.rmtree(path)
     if repo_exists(path):
         if verbose:
-            _log(f"using existing clone: {path}", indent=1)
+            _log(f"using existing clone: {path}", indent=1, prefix=target.id)
         return path
+
+    if shutdown is not None and shutdown.is_set():
+        raise RuntimeError("shutdown requested before clone")
 
     path.parent.mkdir(parents=True, exist_ok=True)
     if verbose:
-        _log(f"cloning {target.repo} -> {path}", indent=1)
+        _log(f"cloning {target.repo} -> {path}", indent=1, prefix=target.id)
     cmd = [
         "git",
         "-c",
@@ -153,10 +169,7 @@ def clear_generated_outputs(repo_path: Path) -> None:
         try:
             shutil.rmtree(rag_kb)
         except OSError:
-            # Python's fd-based rmtree can raise ENOTEMPTY on macOS when the
-            # directory contains entries it couldn't fully clean (e.g. files
-            # whose names were generated before the filename-length fix).
-            # Fall back to the OS rm command which is more resilient.
+            # Python fd-based rmtree can raise ENOTEMPTY on macOS; fall back to os rm.
             subprocess.run(["rm", "-rf", str(rag_kb)], check=False)
     log_path = repo_path / "repo-parser.log"
     if log_path.exists():
@@ -188,6 +201,25 @@ def run_vegaparser(repo_path: Path, languages: tuple[str, ...]) -> RunResult:
     )
 
 
+def _cancelled_result(target: BenchmarkTarget, started_at: str) -> dict:
+    return {
+        "id": target.id,
+        "repo": target.repo,
+        "tier": target.tier,
+        "languages": ",".join(target.languages),
+        "notes": target.notes,
+        "modules": 0,
+        "status": "cancelled",
+        "cold_avg_s": None,
+        "cold_min_s": None,
+        "cold_max_s": None,
+        "warm_s": None,
+        "workspace": "",
+        "started_at": started_at,
+        "finished_at": _iso(),
+    }
+
+
 def run_target(
     target: BenchmarkTarget,
     workspace: Path,
@@ -195,10 +227,17 @@ def run_target(
     warm: bool,
     refresh: bool,
     verbose: bool = False,
+    shutdown: threading.Event | None = None,
 ) -> dict:
     target_started_at = _iso()
+
+    if shutdown is not None and shutdown.is_set():
+        return _cancelled_result(target, target_started_at)
+
     try:
-        repo_path = ensure_repo(target, workspace, refresh=refresh, verbose=verbose)
+        repo_path = ensure_repo(
+            target, workspace, refresh=refresh, verbose=verbose, shutdown=shutdown
+        )
     except Exception as exc:
         return {
             "id": target.id,
@@ -223,8 +262,11 @@ def run_target(
     last_error = ""
 
     for run_no in range(1, repeat + 1):
+        if shutdown is not None and shutdown.is_set():
+            last_error = "interrupted"
+            break
         if verbose:
-            _log(f"cold run {run_no}/{repeat} started", indent=1)
+            _log(f"cold run {run_no}/{repeat} started", indent=1, prefix=target.id)
         clear_generated_outputs(repo_path)
         result = run_vegaparser(repo_path, target.languages)
         cold_times.append(result.duration_seconds)
@@ -235,17 +277,18 @@ def run_target(
                 f"cold run {run_no}/{repeat} finished in {result.duration_seconds:.2f}s"
                 f" (modules={module_count}, rc={last_rc})",
                 indent=1,
+                prefix=target.id,
             )
         if last_rc != 0:
             last_error = "cold run failed"
             if result.stderr_tail:
-                _log(result.stderr_tail, stderr=True)
+                _log(result.stderr_tail, prefix=target.id, stderr=True)
             break
 
     warm_seconds = None
-    if warm and last_rc == 0:
+    if warm and last_rc == 0 and not (shutdown is not None and shutdown.is_set()):
         if verbose:
-            _log("warm run started", indent=1)
+            _log("warm run started", indent=1, prefix=target.id)
         result = run_vegaparser(repo_path, target.languages)
         warm_seconds = result.duration_seconds
         module_count = result.module_count
@@ -255,11 +298,17 @@ def run_target(
                 f"warm run finished in {result.duration_seconds:.2f}s"
                 f" (modules={module_count}, rc={last_rc})",
                 indent=1,
+                prefix=target.id,
             )
         if last_rc != 0:
             last_error = "warm run failed"
             if result.stderr_tail:
-                _log(result.stderr_tail, stderr=True)
+                _log(result.stderr_tail, prefix=target.id, stderr=True)
+
+    # Mark interrupted only when we exited before completing all intended cold runs.
+    if shutdown is not None and shutdown.is_set() and not last_error and len(cold_times) < repeat:
+        last_error = "interrupted"
+    status = "ok" if last_rc == 0 and not last_error else last_error or f"exit {last_rc}"
 
     return {
         "id": target.id,
@@ -268,7 +317,7 @@ def run_target(
         "languages": ",".join(target.languages),
         "notes": target.notes,
         "modules": module_count,
-        "status": "ok" if last_rc == 0 else last_error or f"exit {last_rc}",
+        "status": status,
         "cold_avg_s": statistics.mean(cold_times) if cold_times else None,
         "cold_min_s": min(cold_times) if cold_times else None,
         "cold_max_s": max(cold_times) if cold_times else None,
@@ -344,6 +393,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--list", action="store_true", help="List the benchmark suite and exit.")
     parser.add_argument("--json", dest="json_path", type=Path, help="Write benchmark results as JSON.")
     parser.add_argument("--verbose", action="store_true", help="Print detailed per-step progress logs.")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Number of benchmark targets to run in parallel (default: 1).",
+    )
     return parser.parse_args()
 
 
@@ -370,35 +426,84 @@ def main() -> int:
         _log("No benchmark targets matched the provided filters.", stderr=True)
         return 2
 
+    workers = max(1, args.workers)
+    repeat = max(1, args.repeat)
     args.workspace.mkdir(parents=True, exist_ok=True)
     total = len(selected)
+    shutdown = threading.Event()
+
     suite_start = time.perf_counter()
     _log(
         f"Starting benchmark: {total} target(s)"
-        f" (repeat={max(1, args.repeat)}, warm={args.warm}, refresh={args.refresh})"
+        f" (workers={workers}, repeat={repeat}, warm={args.warm}, refresh={args.refresh})"
     )
-    results: list[dict] = []
-    for idx, target in enumerate(selected, start=1):
-        _log(f"[{idx}/{total}] {target.id} ({target.tier}) started")
-        result = run_target(
-            target,
-            args.workspace,
-            max(1, args.repeat),
-            args.warm,
-            args.refresh,
-            verbose=args.verbose,
-        )
-        results.append(result)
-        _log(
-            f"[{idx}/{total}] {target.id} done"
-            f" | {result['status']}"
-            f" | cold_avg={format_seconds_with_unit(result['cold_avg_s'])}"
-            f" | warm={format_seconds_with_unit(result['warm_s'])}"
-            f" | modules={result['modules']}"
-        )
+
+    results_by_id: dict[str, dict] = {}
+    interrupted = False
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="bench") as executor:
+        future_to_target: dict[Future[dict], BenchmarkTarget] = {
+            executor.submit(
+                run_target,
+                target,
+                args.workspace,
+                repeat,
+                args.warm,
+                args.refresh,
+                args.verbose,
+                shutdown,
+            ): target
+            for target in selected
+        }
+        _log(f"Submitted {len(future_to_target)} task(s) across {workers} worker(s)")
+
+        try:
+            for future in as_completed(future_to_target):
+                target = future_to_target[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    result = _cancelled_result(target, _iso())
+                    result["status"] = f"error: {exc}"
+                results_by_id[target.id] = result
+                _log(
+                    f"[{len(results_by_id)}/{total}] {target.id} done"
+                    f" | {result['status']}"
+                    f" | cold_avg={format_seconds_with_unit(result['cold_avg_s'])}"
+                    f" | warm={format_seconds_with_unit(result['warm_s'])}"
+                    f" | modules={result['modules']}"
+                )
+        except KeyboardInterrupt:
+            interrupted = True
+            _log(
+                f"Interrupt received -- stopping after in-flight tasks complete"
+                f" ({len(results_by_id)}/{total} done so far)..."
+            )
+            shutdown.set()
+            for fut in future_to_target:
+                fut.cancel()
+            # Drain tasks already running so they observe the shutdown event.
+            for future in as_completed(future_to_target):
+                target = future_to_target[future]
+                if target.id in results_by_id:
+                    continue
+                try:
+                    result = future.result()
+                except Exception:
+                    result = _cancelled_result(target, _iso())
+                results_by_id[target.id] = result
+            # Mark targets that never started.
+            for target in selected:
+                if target.id not in results_by_id:
+                    results_by_id[target.id] = _cancelled_result(target, _iso())
 
     suite_elapsed = time.perf_counter() - suite_start
-    _log(f"Benchmark finished in {suite_elapsed:.2f}s total")
+    status_tag = " (interrupted)" if interrupted else ""
+    _log(f"Benchmark finished in {suite_elapsed:.2f}s total{status_tag}")
+
+    # Restore original suite order.
+    results = [results_by_id[t.id] for t in selected if t.id in results_by_id]
+
     if args.verbose:
         _log("Summary")
         for line in _table_lines(results):
@@ -412,7 +517,7 @@ def main() -> int:
         args.json_path.parent.mkdir(parents=True, exist_ok=True)
         args.json_path.write_text(json.dumps(results, indent=2, sort_keys=True), encoding="utf-8")
 
-    return 0
+    return 1 if interrupted else 0
 
 
 if __name__ == "__main__":
