@@ -547,6 +547,7 @@ python scripts/benchmark_vegaparser.py \
 | `--json <file>` | Export full results as JSON |
 | `--verbose` | Print detailed step-by-step progress logs during clone and runs |
 | `--workers <n>` | Run up to `n` targets in parallel (default: `1`) |
+| `--max-heavy-workers <n>` | Cap concurrent `heavy` targets when running in parallel (default: `2`) |
 
 ### Parallel execution
 
@@ -559,11 +560,18 @@ python scripts/benchmark_vegaparser.py --tier light --workers 5
 
 # Run heavy targets 2 at a time with verbose per-target logs
 python scripts/benchmark_vegaparser.py --tier heavy --workers 2 --verbose
+
+# Use 6 total workers but cap heavy repos to 2 concurrent parsers
+python scripts/benchmark_vegaparser.py --workers 6 --max-heavy-workers 2 --verbose
 ```
 
 Each worker prefixes its log lines with `[target-id]` so interleaved output is always
 attributable. The final summary table is always printed in original suite order regardless
 of completion order.
+
+Targets that resolve to the same clone path (for example `go-heavy` and `yaml-heavy`, both
+using `kubernetes/kubernetes`) are automatically serialized with a repository lock so they
+cannot delete each other's `.rag_kb` state during parallel runs.
 
 **Graceful Ctrl+C:** pressing Ctrl+C at any point sets a shared shutdown signal:
 - In-flight workers finish their current run and exit with `status=interrupted`.

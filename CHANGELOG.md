@@ -62,6 +62,10 @@ Versions follow [Semantic Versioning](https://semver.org/).
   - Suite banner now shows the active worker count: `Starting benchmark: N target(s) (workers=W, ...)`.
   - A `Submitted N task(s) across W worker(s)` line is emitted once all tasks are queued.
   - Completion order reflects wall-clock finish time; final summary table is always in original suite order.
+- Hardened parallel execution for shared repositories and heavy-target contention:
+  - Added per-repository path locks so targets sharing one clone (for example `go-heavy` and `yaml-heavy`) cannot race on `.rag_kb` cleanup.
+  - Added `--max-heavy-workers` (default `2`) to cap concurrent heavy runs even when `--workers` is higher.
+  - Benchmark banner now reports both `workers` and effective `heavy_workers` values.
 - Added graceful Ctrl+C (SIGINT) shutdown:
   - The main thread catches `KeyboardInterrupt`, sets a shared `threading.Event`, and cancels pending futures.
   - In-flight workers observe the event at run boundaries and exit early with `status=interrupted`.

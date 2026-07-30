@@ -12,7 +12,9 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +24,10 @@ DEFAULT_WORKSPACE = Path.home() / ".cache" / "vegaparser-benchmarks"
 
 # Serialises all log output so parallel workers do not interleave lines.
 _log_lock = threading.Lock()
+
+# Guards the per-repository lock map used to prevent shared-path races.
+_repo_lock_map_guard = threading.Lock()
+_repo_lock_map: dict[str, threading.Lock] = {}
 
 
 def _ts() -> str:
@@ -41,6 +47,58 @@ def _log(message: str, *, indent: int = 0, prefix: str = "", stderr: bool = Fals
     tag = f"[{prefix}] " if prefix else ""
     with _log_lock:
         print(f"{padding}[{_ts()}] {tag}{message}", file=stream, flush=True)
+
+
+def _repo_lock_for(path: Path) -> threading.Lock:
+    key = str(path.resolve())
+    with _repo_lock_map_guard:
+        lock = _repo_lock_map.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _repo_lock_map[key] = lock
+    return lock
+
+
+@contextmanager
+def _acquire_repo_lock(repo_path: Path, *, target_id: str, verbose: bool) -> Iterator[None]:
+    """Serialise targets that resolve to the same clone path."""
+    lock = _repo_lock_for(repo_path)
+    if verbose:
+        _log(f"waiting for repository lock: {repo_path}", indent=1, prefix=target_id)
+    lock.acquire()
+    try:
+        if verbose:
+            _log(f"acquired repository lock: {repo_path}", indent=1, prefix=target_id)
+        yield
+    finally:
+        lock.release()
+        if verbose:
+            _log(f"released repository lock: {repo_path}", indent=1, prefix=target_id)
+
+
+@contextmanager
+def _acquire_heavy_slot(
+    target: BenchmarkTarget,
+    heavy_slots: threading.Semaphore | None,
+    *,
+    verbose: bool,
+) -> Iterator[None]:
+    """Limit heavy-target parse concurrency to reduce extreme contention."""
+    if target.tier != "heavy" or heavy_slots is None:
+        yield
+        return
+
+    if verbose:
+        _log("waiting for heavy-worker slot", indent=1, prefix=target.id)
+    heavy_slots.acquire()
+    try:
+        if verbose:
+            _log("acquired heavy-worker slot", indent=1, prefix=target.id)
+        yield
+    finally:
+        heavy_slots.release()
+        if verbose:
+            _log("released heavy-worker slot", indent=1, prefix=target.id)
 
 
 @dataclass(frozen=True)
@@ -228,105 +286,111 @@ def run_target(
     refresh: bool,
     verbose: bool = False,
     shutdown: threading.Event | None = None,
+    heavy_slots: threading.Semaphore | None = None,
 ) -> dict:
     target_started_at = _iso()
+    repo_path = clone_path(workspace, target)
 
     if shutdown is not None and shutdown.is_set():
         return _cancelled_result(target, target_started_at)
 
-    try:
-        repo_path = ensure_repo(
-            target, workspace, refresh=refresh, verbose=verbose, shutdown=shutdown
-        )
-    except Exception as exc:
+    with _acquire_repo_lock(repo_path, target_id=target.id, verbose=verbose):
+        if shutdown is not None and shutdown.is_set():
+            return _cancelled_result(target, target_started_at)
+
+        try:
+            repo_path = ensure_repo(
+                target, workspace, refresh=refresh, verbose=verbose, shutdown=shutdown
+            )
+        except Exception as exc:
+            return {
+                "id": target.id,
+                "repo": target.repo,
+                "tier": target.tier,
+                "languages": ",".join(target.languages),
+                "notes": target.notes,
+                "modules": 0,
+                "status": f"clone failed: {exc}",
+                "cold_avg_s": None,
+                "cold_min_s": None,
+                "cold_max_s": None,
+                "warm_s": None,
+                "workspace": "",
+                "started_at": target_started_at,
+                "finished_at": _iso(),
+            }
+
+        cold_times: list[float] = []
+        module_count = 0
+        last_rc = 0
+        last_error = ""
+
+        with _acquire_heavy_slot(target, heavy_slots, verbose=verbose):
+            for run_no in range(1, repeat + 1):
+                if shutdown is not None and shutdown.is_set():
+                    last_error = "interrupted"
+                    break
+                if verbose:
+                    _log(f"cold run {run_no}/{repeat} started", indent=1, prefix=target.id)
+                clear_generated_outputs(repo_path)
+                result = run_vegaparser(repo_path, target.languages)
+                cold_times.append(result.duration_seconds)
+                module_count = result.module_count
+                last_rc = result.returncode
+                if verbose:
+                    _log(
+                        f"cold run {run_no}/{repeat} finished in {result.duration_seconds:.2f}s"
+                        f" (modules={module_count}, rc={last_rc})",
+                        indent=1,
+                        prefix=target.id,
+                    )
+                if last_rc != 0:
+                    last_error = "cold run failed"
+                    if result.stderr_tail:
+                        _log(result.stderr_tail, prefix=target.id, stderr=True)
+                    break
+
+            warm_seconds = None
+            if warm and last_rc == 0 and not (shutdown is not None and shutdown.is_set()):
+                if verbose:
+                    _log("warm run started", indent=1, prefix=target.id)
+                result = run_vegaparser(repo_path, target.languages)
+                warm_seconds = result.duration_seconds
+                module_count = result.module_count
+                last_rc = result.returncode
+                if verbose:
+                    _log(
+                        f"warm run finished in {result.duration_seconds:.2f}s"
+                        f" (modules={module_count}, rc={last_rc})",
+                        indent=1,
+                        prefix=target.id,
+                    )
+                if last_rc != 0:
+                    last_error = "warm run failed"
+                    if result.stderr_tail:
+                        _log(result.stderr_tail, prefix=target.id, stderr=True)
+
+        # Mark interrupted only when we exited before completing all intended cold runs.
+        if shutdown is not None and shutdown.is_set() and not last_error and len(cold_times) < repeat:
+            last_error = "interrupted"
+        status = "ok" if last_rc == 0 and not last_error else last_error or f"exit {last_rc}"
+
         return {
             "id": target.id,
             "repo": target.repo,
             "tier": target.tier,
             "languages": ",".join(target.languages),
             "notes": target.notes,
-            "modules": 0,
-            "status": f"clone failed: {exc}",
-            "cold_avg_s": None,
-            "cold_min_s": None,
-            "cold_max_s": None,
-            "warm_s": None,
-            "workspace": "",
+            "modules": module_count,
+            "status": status,
+            "cold_avg_s": statistics.mean(cold_times) if cold_times else None,
+            "cold_min_s": min(cold_times) if cold_times else None,
+            "cold_max_s": max(cold_times) if cold_times else None,
+            "warm_s": warm_seconds,
+            "workspace": str(repo_path),
             "started_at": target_started_at,
             "finished_at": _iso(),
         }
-
-    cold_times: list[float] = []
-    module_count = 0
-    last_rc = 0
-    last_error = ""
-
-    for run_no in range(1, repeat + 1):
-        if shutdown is not None and shutdown.is_set():
-            last_error = "interrupted"
-            break
-        if verbose:
-            _log(f"cold run {run_no}/{repeat} started", indent=1, prefix=target.id)
-        clear_generated_outputs(repo_path)
-        result = run_vegaparser(repo_path, target.languages)
-        cold_times.append(result.duration_seconds)
-        module_count = result.module_count
-        last_rc = result.returncode
-        if verbose:
-            _log(
-                f"cold run {run_no}/{repeat} finished in {result.duration_seconds:.2f}s"
-                f" (modules={module_count}, rc={last_rc})",
-                indent=1,
-                prefix=target.id,
-            )
-        if last_rc != 0:
-            last_error = "cold run failed"
-            if result.stderr_tail:
-                _log(result.stderr_tail, prefix=target.id, stderr=True)
-            break
-
-    warm_seconds = None
-    if warm and last_rc == 0 and not (shutdown is not None and shutdown.is_set()):
-        if verbose:
-            _log("warm run started", indent=1, prefix=target.id)
-        result = run_vegaparser(repo_path, target.languages)
-        warm_seconds = result.duration_seconds
-        module_count = result.module_count
-        last_rc = result.returncode
-        if verbose:
-            _log(
-                f"warm run finished in {result.duration_seconds:.2f}s"
-                f" (modules={module_count}, rc={last_rc})",
-                indent=1,
-                prefix=target.id,
-            )
-        if last_rc != 0:
-            last_error = "warm run failed"
-            if result.stderr_tail:
-                _log(result.stderr_tail, prefix=target.id, stderr=True)
-
-    # Mark interrupted only when we exited before completing all intended cold runs.
-    if shutdown is not None and shutdown.is_set() and not last_error and len(cold_times) < repeat:
-        last_error = "interrupted"
-    status = "ok" if last_rc == 0 and not last_error else last_error or f"exit {last_rc}"
-
-    return {
-        "id": target.id,
-        "repo": target.repo,
-        "tier": target.tier,
-        "languages": ",".join(target.languages),
-        "notes": target.notes,
-        "modules": module_count,
-        "status": status,
-        "cold_avg_s": statistics.mean(cold_times) if cold_times else None,
-        "cold_min_s": min(cold_times) if cold_times else None,
-        "cold_max_s": max(cold_times) if cold_times else None,
-        "warm_s": warm_seconds,
-        "workspace": str(repo_path),
-        "started_at": target_started_at,
-        "finished_at": _iso(),
-    }
-
 
 def format_seconds(value: float | None) -> str:
     if value is None:
@@ -400,6 +464,13 @@ def parse_args() -> argparse.Namespace:
         metavar="N",
         help="Number of benchmark targets to run in parallel (default: 1).",
     )
+    parser.add_argument(
+        "--max-heavy-workers",
+        type=int,
+        default=2,
+        metavar="N",
+        help="Maximum number of heavy targets to run concurrently when workers > 1 (default: 2).",
+    )
     return parser.parse_args()
 
 
@@ -428,15 +499,23 @@ def main() -> int:
 
     workers = max(1, args.workers)
     repeat = max(1, args.repeat)
+    max_heavy_workers = max(1, args.max_heavy_workers)
+    has_heavy_targets = any(target.tier == "heavy" for target in selected)
+    heavy_workers = min(workers, max_heavy_workers) if has_heavy_targets else workers
     args.workspace.mkdir(parents=True, exist_ok=True)
     total = len(selected)
     shutdown = threading.Event()
+    heavy_slots = threading.Semaphore(max(1, heavy_workers))
 
     suite_start = time.perf_counter()
     _log(
         f"Starting benchmark: {total} target(s)"
-        f" (workers={workers}, repeat={repeat}, warm={args.warm}, refresh={args.refresh})"
+        f" (workers={workers}, heavy_workers={heavy_workers}, repeat={repeat}, warm={args.warm}, refresh={args.refresh})"
     )
+    if workers > heavy_workers and has_heavy_targets:
+        _log(
+            f"Heavy-target concurrency capped at {heavy_workers}; use --max-heavy-workers to tune"
+        )
 
     results_by_id: dict[str, dict] = {}
     interrupted = False
@@ -452,6 +531,7 @@ def main() -> int:
                 args.refresh,
                 args.verbose,
                 shutdown,
+                heavy_slots,
             ): target
             for target in selected
         }
