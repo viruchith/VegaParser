@@ -53,6 +53,7 @@ Versions follow [Semantic Versioning](https://semver.org/).
   - per-target progress (`[i/N]`) and completion summaries
   - final summary table
 - Added `--verbose` for detailed step logs (clone/cache actions, per-run timings, and failure stderr tail).
+- Enhanced benchmark timing visibility: logs now include start/finish timestamps for the full benchmark run, each target, and each verbose cold/warm test pass.
 
 #### Benchmark baseline results
 - Full-suite cold benchmark (`42` targets, `repeat=1`, `warm=False`) now completes end-to-end with
@@ -71,8 +72,7 @@ Versions follow [Semantic Versioning](https://semver.org/).
 #### CI test fixes
 - All 160 tests now pass green on GitHub Actions after resolving import errors, missing methods,
   and tree-sitter adapter gaps introduced by the previous commit.
-- Coverage threshold lowered from 80% → 78% to reflect uncovered `java_queries.py` and
-  `sql_queries.py` fallback code paths (no unit tests yet for those modules).
+- Reverted GitHub Actions coverage validation back to `80%` (`--cov-fail-under=80`).
 
 ---
 
