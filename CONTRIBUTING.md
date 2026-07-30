@@ -22,6 +22,7 @@ Thank you for your interest in contributing. This document is the **technical re
    - [stack/detector.py](#stackdetectorpy)
    - [cache.py](#cachepy)
    - [cli.py](#clipy)
+   - [scripts/benchmark_vegaparser.py](#scriptsbenchmark_vegaparserpy)
    - [ui/](#ui)
 4. [Data Flow in Detail](#data-flow-in-detail)
 5. [Adding a New Language](#adding-a-new-language)
@@ -84,9 +85,9 @@ CLI (cli.py)
   │     • binary detection
   │     └─▶ list[Path]
   │
-  ├── IndexCache                 cache.py
-  │     • SHA-256 manifest
-  │     • serialised ParsedFile
+  ├── parse_cache helpers        cache.py
+  │     • parse_cache.json payload (version/filter/files)
+  │     • serialised ParsedFile + file signatures
   │     └─▶ cache hit/miss per file
   │
   ├── ParserEngine               parser/engine.py
@@ -148,12 +149,13 @@ content = scanner.read_file(files[0])
 **Key internals:**
 
 - `SKIP_DIRS` — set of directory names that are always skipped (`.git`, `node_modules`, `venv`, `.rag_kb`, `__pycache__`, etc.)
-- `_should_skip_dir(name)` — also skips any dir starting with `.` (hidden)
+- `_should_skip_dir(rel_dir_posix, name)` — also skips hidden dirs and prunes `.gitignore`-matched directories before descent
 - `_is_binary(path)` — checks `BINARY_EXTENSIONS` set first; falls back to null-byte heuristic (reads first 8 KB)
 - `_load_gitignore(root)` — loads `.gitignore` with `pathspec.PathSpec.from_lines("gitwildmatch", ...)`
 - `_is_selected_file(path, rel_posix)` — calls `detect_language()` then checks `self.languages` and `self.extensions` filters
+- `MAX_FILE_BYTES` — skips files larger than 512 KB to avoid generated/minified artifacts dominating parse time
 
-**Important:** `discover()` uses `rglob("*")` which returns all descendants. The skip logic filters *after* the fact (checking `rel.parts[:-1]`), not by pruning the walk. This is correct but means very large repos may be slow — the skip check is O(depth) per file.
+**Important:** `discover()` uses `os.walk()` and prunes skip/ignored directories in-place (`dirnames[:] = ...`) so the walk does not descend into excluded trees. This is a major traversal speedup on large repos.
 
 ---
 
@@ -195,13 +197,13 @@ engine.infer_internal_dependencies(parsed_files)
 
 1. `detect_language(filepath)` → language string or `None`
 2. Lookup `PARSERS[language]` → language-specific callable
-3. Config-only languages (`env`, `properties`, `ini`) bypass tree-sitter and call the parser directly
-4. All others: `_get_parser(lang_name)` → `get_parser(grammar)` from `tree-sitter-language-pack`
+3. Config/heuristic languages (`env`, `properties`, `ini`, `java`, `sql`, `plsql`) bypass tree-sitter and call the parser directly
+4. Tree-sitter languages use `_parse_file_isolated()` with grammar aliases and per-thread parser reuse via `_get_ts_parser()`
 5. Call `parser_fn(filepath, source, parser)` → `ParsedFile`
-6. Call `enrich_parsed_file(result, source)` — appends URLs + DB endpoints
-7. Catch all exceptions, log `ERROR`, return `None` (never raises to caller)
+6. `_parse_file_isolated()` enriches each parsed result with URLs + DB endpoints
+7. Catch all exceptions, log failures, return `None` (never raises to caller)
 
-**`_get_parser` caches parsers** in `self._parser_cache` to avoid repeated grammar loading.
+**Thread-safety note:** tree-sitter parsers are not shared across threads. Each worker thread keeps its own parser cache.
 
 **`infer_internal_dependencies`** builds a stem map of all known module paths, then for each `ParsedFile`, tries to resolve each import token against that map. Relative imports (starting with `.`) are resolved relative to the file's directory. Only exact matches are linked — this is intentionally conservative.
 
@@ -436,14 +438,21 @@ Parsing is line-by-line for all formats; `json.loads` for `package.json`. Missin
 
 ### `cache.py`
 
-`IndexCache` manages `.rag_kb/.cache/manifest.json`.
+Incremental caching is persisted to `.rag_kb/parse_cache.json`.
 
-**Manifest format:**
+**Cache payload format:**
 ```json
 {
-  "src/app.py": {
-    "hash": "sha256hex...",
-    "parsed": { "filepath": "...", "language": "python", "classes": [...], ... }
+  "version": 1,
+  "filter": {
+    "languages": ["python"],
+    "extensions": [".py", ".pyw"]
+  },
+  "files": {
+    "src/app.py": {
+      "meta": { "mtime_ns": 0, "size": 0 },
+      "parsed": { "filepath": "...", "language": "python", "classes": [] }
+    }
   }
 }
 ```
@@ -452,15 +461,14 @@ Parsing is line-by-line for all formats; `json.loads` for `package.json`. Missin
 
 | Method | Description |
 |--------|-------------|
-| `load()` | Read manifest from disk; silently no-ops if file missing |
-| `save()` | Write manifest to disk (creates `.cache/` dir if needed) |
-| `is_cached(rel_path, hash, module_file)` | `True` if hash matches AND module `.md` exists on disk |
-| `get_cached_parsed_file(rel_path)` | Deserialise stored `ParsedFile`; returns `None` on error |
-| `update(rel_path, hash, parsed_data)` | Add/replace entry |
-| `remove(rel_path)` | Delete entry (used for stale file purging) |
-| `known_paths()` | `set[str]` of all tracked paths |
+| `cache_path(root)` | Returns `<root>/.rag_kb/parse_cache.json` |
+| `build_filter_signature(languages, extensions)` | Produces deterministic cache filter metadata |
+| `load_cache(root)` | Loads JSON cache payload; returns `None` when missing/invalid |
+| `save_cache(root, payload)` | Writes cache payload to disk |
+| `file_signature(path)` | Returns stat signature (`mtime_ns`, `size`) for cache-hit checks |
+| `parsed_file_to_dict(parsed)` / `parsed_file_from_dict(data)` | Dataclass ↔ dict conversion for cached parsed payloads |
 
-**Deserialisation** in `_dict_to_parsed_file(data)` manually reconstructs nested dataclasses (`ClassInfo`, `FunctionInfo`, `ExternalCall`, `ExternalUrl`, `DatabaseEndpoint`) from dicts, because `dataclasses.asdict` produces plain dicts on serialisation.
+> `IndexCache` remains in `cache.py` for backward compatibility, but the active CLI path uses `load_cache` / `save_cache` and `parse_cache.json`.
 
 ---
 
@@ -472,14 +480,14 @@ Typer application with two commands: `init` and `bundle`.
 1. `setup_logging(verbose)` — configures file handler at `INFO` or `DEBUG`
 2. `RepositoryScanner(root, languages, extensions)` — initialise scanner
 3. `scanner.discover()` wrapped in `run_with_spinner` — shows spinner during discovery
-4. `IndexCache(rag_kb_dir).load()` — load incremental manifest (skipped if `--force`)
-5. **Stale path purge** — `cache.known_paths() - current_rel_paths` → delete module files + cache entries
+4. `load_cache(root)` — load incremental cache payload when `version` and `filter` match
+5. Determine worker count via `--workers/-j` (`0` = auto `min(cpu_count, 8)`)
 6. `parsing_progress(total_steps)` context manager — shows progress bar
-7. `_parse_files(...)` — inner loop: hash check → cache hit/miss → `parse_file` → `cache.update`
+7. `_parse_files(...)` — cache-aware parse pipeline; sequential for `workers=1`, `ThreadPoolExecutor` for `workers>1`
 8. `engine.infer_internal_dependencies(parsed_files)`
-9. `MarkdownGenerator(root).generate(parsed_files)`
-10. `cache.save()`
-11. Print summary with `fresh_count` / `cached_count`
+9. `save_cache(root, payload)` with per-file `meta` + serialized `parsed`
+10. `MarkdownGenerator(root).generate(parsed_files)`
+11. Print summary and log path
 
 **`bundle` flow:**
 1. `setup_logging(verbose)`
@@ -488,12 +496,27 @@ Typer application with two commands: `init` and `bundle`.
 
 ---
 
+### `scripts/benchmark_vegaparser.py`
+
+Central benchmark orchestrator for the full language suite.
+
+- Runs benchmark targets from one script with per-target language filters
+- Supports target-level parallelism via `--workers`
+- Caps heavy-target concurrency via `--max-heavy-workers`
+- Emits timestamped CLI log lines at every verbosity level
+- Handles `Ctrl+C` gracefully by setting a shutdown event, draining in-flight tasks, and marking unfinished targets as `cancelled`
+- Snapshots each target's `.rag_kb` and `repo-parser.log` to `.benchmark-artifacts/<target-id>/` and records them as `artifact_rag_kb` / `artifact_log` in JSON output
+
+Use this script for reproducible benchmark runs and per-target artifact audits.
+
+---
+
 ### `ui/`
 
 | Module | Exports | Notes |
 |--------|---------|-------|
 | `console.py` | `console` — shared `rich.Console` instance | All non-log output goes through this |
-| `logging_config.py` | `setup_logging(verbose) → Path` | Configures a `FileHandler`; returns log file path; never adds `StreamHandler` |
+| `logging_config.py` | `setup_logging(verbose, log_dir=None, log_target='file') → Path \\| None` | Supports file/console/both handlers; CLI defaults to file logging |
 | `progress.py` | `run_with_spinner`, `parsing_progress`, `truncate_filepath` | `run_with_spinner` runs a callable while showing a spinner; `parsing_progress` is a context manager that yields an `update` callable |
 
 ---
@@ -501,7 +524,7 @@ Typer application with two commands: `init` and `bundle`.
 ## Data Flow in Detail
 
 ```
-CLI init(path, languages, verbose, force)
+CLI init(path, languages, workers, verbose)
   │
   ├── setup_logging(verbose)
   │     → repo-parser.log (FileHandler only)
@@ -510,33 +533,21 @@ CLI init(path, languages, verbose, force)
   │     → .gitignore loaded via pathspec
   │     → discover() → sorted list[rel_path]
   │
-  ├── IndexCache.load()
-  │     → manifest.json → dict[rel_str, {hash, parsed}]
+  ├── load_cache(root)
+  │     → parse_cache.json (version/filter/files)
   │
-  ├── Stale purge
-  │     known_paths - current_paths → delete module .md + cache.remove()
+  ├── _parse_files(..., workers)
+  │     → sequential (workers=1) or ThreadPoolExecutor (workers>1)
   │
   ├── For each rel_path:
   │     content = scanner.read_file(rel_path)    # UTF-8 with error replace
-  │     hash = sha256(content)
-  │     │
-  │     ├── cache.is_cached(rel_str, hash, module_file) → True?
-  │     │     → cache.get_cached_parsed_file()
-  │     │     → append to parsed_files (skip parse_file)
-  │     │
-  │     └── cache miss / force:
-  │           engine.parse_file(rel_str, content)
-  │             → detect_language(rel_str) → lang
-  │             → PARSERS[lang](fp, source, parser) → ParsedFile
-  │             → enrich_parsed_file(result, source)
-  │                   → extract_endpoints(source)
-  │                   → result.external_urls.extend(urls)
-  │                   → result.database_endpoints.extend(db_eps)
-  │           cache.update(rel_str, hash, asdict(result))
-  │           → append to parsed_files
+  │     → cache hit: parsed_file_from_dict(...)
+  │     → cache miss: engine.parse_file(...)
   │
   ├── engine.infer_internal_dependencies(parsed_files)
   │     → populates ParsedFile.internal_dependencies
+  │
+  ├── save_cache(root, payload)
   │
   ├── MarkdownGenerator(root).generate(parsed_files)
   │     → modules_dir.mkdir(parents=True, exist_ok=True)
@@ -544,7 +555,7 @@ CLI init(path, languages, verbose, force)
   │           module.md.j2.render(...) → modules/<name>.md
   │     → project_index.md.j2.render(...) → project_index.md
   │
-  └── cache.save() → manifest.json
+  └── write .rag_kb/modules/*.md + project_index.md
 ```
 
 ---
