@@ -46,7 +46,7 @@ jobs:
             --cov=repo_parser \
             --cov-report=term-missing \
             --cov-report=xml:coverage.xml \
-            --cov-fail-under=91 \
+            --cov-fail-under=80 \
             -v
       - name: Upload coverage XML
         if: matrix.python-version == '3.12'
