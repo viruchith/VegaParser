@@ -18,6 +18,8 @@ coverage.xml
 # Output
 .rag_kb/
 repo-parser.log
+# Local benchmark output contains machine-specific paths; curated numbers live in docs/
+benchmark-results.json
 
 # IDE
 .idea/
