@@ -328,13 +328,7 @@ Runs **on every parsed file** after language-specific extraction, regardless of 
 
 7. **`URL_PATTERN`** — HTTP/WS/FTP URLs; skips localhost/127.0.0.1/0.0.0.0; skips URIs already matched by `CONN_URI_PATTERN`.
 
-**`redact_secrets(value)`** — two-pass redaction:
-```python
-# Pass 1: ://user:password@  →  ://user:***@
-re.sub(r"://([^:/@]*):([^@/]+)@", r"://\1:***@", value)
-# Pass 2: password=value  →  password=***
-re.sub(r"(?i)(password|passwd|pwd|secret|token)\s*[=:]\s*['\"]?[^'\"#\s,]+", r"\1=***", value)
-```
+**`redact_secrets(value)`** delegates to `repo_parser/redaction.py` (`redact_text`). That module holds the full rule list (URL credentials, query secrets, key formats, credential assignments) and is the only place redaction rules are defined. `ParserEngine.parse_file` applies it to every parsed file. See `DESIGN.md → Secret redaction` for the categories and placeholder rules.
 
 **Known limitations** (documented in `DESIGN.md`):
 - Multi-line string concatenation (e.g. `"postgres://" + password + "@host"`) — not detected

@@ -43,7 +43,7 @@
 | **Project-wide index** | `project_index.md` aggregates tech stack, dependency graph, all external URLs, and DB endpoints |
 | **LLM context bundle** | `bundle` command concatenates everything into a single `full_repo_context.md` with size/token estimates |
 | **Endpoint discovery** | Detects HTTP URLs, connection URIs, `.env` variables, JDBC strings, `create_engine()` calls, KV config |
-| **Secret redaction** | Passwords in connection strings are replaced with `***` before writing to any output file |
+| **Secret redaction** | Likely secrets (URL passwords, query tokens, common key formats, credential assignments) are replaced with `***` before any output file is written |
 | **Incremental caching** | SHA-256 manifest skips unchanged files on re-runs; stale module files are automatically removed |
 | **Infrastructure-aware** | Dockerfile, Kubernetes manifests, Terraform/HCL, PL/SQL heuristics |
 | **Smart traversal** | Respects `.gitignore`, skips hidden dirs, `node_modules`, binaries, and the `.rag_kb/` output dir itself |
@@ -182,6 +182,7 @@ Scans `PATH` (default: current directory), parses every supported source file, a
 | `--verbose` | `-v` | flag | off | Write DEBUG-level details to `repo-parser.log` |
 | `--log-target` | — | `file\\|console\\|both` | `file` | Choose where logs are written |
 | `--force` / `--no-cache` | — | flag | off | Bypass the incremental cache; reparse every file from scratch |
+| `--report-secrets` | — | flag | off | List likely secrets as category, file and line. Values are never printed. |
 
 **Examples:**
 
@@ -369,7 +370,11 @@ After Tree-sitter parsing, every file is scanned by `endpoints.py` regardless of
 | Env var assignments | `DATABASE_URL`, `PGHOST`, `REDIS_URL`, `SPRING_DATASOURCE_URL`, … |
 | KV config lines | `host = db.internal`, `port: 5432`, `"database": "myapp"` |
 
-**Passwords are always redacted** to `***` in all output. Known limitations (multi-line concatenations, f-string interpolation) are documented in `DESIGN.md → Endpoint Extraction → Known Limitations`.
+**Likely secrets are always redacted** to `***` in every output: module docs, the project index, the parse cache, the bundle and the log. This covers URL passwords (including passwords that contain `@`), query tokens, common key formats (AWS, GitHub, Slack, Google, Stripe, JWT, PEM headers) and `password`/`secret`/`token`/`api_key` assignments. Placeholders such as `changeme` are kept. Redaction cannot be turned off.
+
+`init` prints how many likely secrets it redacted. Add `--report-secrets` to list each one by category, file and line. Values are never printed.
+
+The full category list and known limitations are in `DESIGN.md → Secret redaction`.
 
 ---
 

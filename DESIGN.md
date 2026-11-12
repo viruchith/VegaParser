@@ -165,13 +165,43 @@ Runs on **all** parsed files after tree-sitter extraction. Regex-based, language
 5. **Dict literals** — `"host": "value"` in Python/JSON
 6. **Driver strings** — `create_engine("…")`
 
-Passwords are redacted in output (`***`).
+### Secret redaction (`repo_parser/redaction.py`)
+
+Redaction runs once per parsed file in `ParserEngine.parse_file`, after endpoint extraction. Every string in the resulting `ParsedFile` is rewritten before it reaches the cache, the module docs, the project index, the bundle or the log. Stack detection output (`requirements.txt`, `package.json`, …) is redacted the same way before the index is rendered. Redaction is always on; there is no opt-out.
+
+Only values are removed. Host, port, user and database names are kept.
+
+| Category | What is matched | Example output |
+|----------|-----------------|----------------|
+| `url-credentials` | `scheme://user:password@host`; the password may contain `@` (matched up to the last `@` before `/`) | `postgresql://app:***@db:5432/orders` |
+| `url-query-secret` | query parameters `key`, `token`, `secret`, `password`, `passwd`, `pwd`, `sig`, `api_key`, `apikey`, `access_token`, `access_key`, `client_secret` | `?api_key=***` |
+| `aws-access-key` | `AKIA…` / `ASIA…` + 16 characters | `***` |
+| `github-token` | `gh[pousr]_` + 36 or more characters | `***` |
+| `slack-token` | `xox[baprs]-…` | `***` |
+| `google-api-key` | `AIza` + 35 characters | `***` |
+| `stripe-live-key` | `sk_live_…`, `rk_live_…` | `***` |
+| `jwt` | three base64url segments, the first two starting `eyJ` | `***` |
+| `private-key` | PEM `BEGIN … PRIVATE KEY` header line | `***` |
+| `credential-assignment` | `password`, `passwd`, `pwd`, `secret`, `token`, `api_key`, `access_key`, `client_secret` assigned a value of 8+ characters (quoted or bare) | `password=***` |
+
+**Not redacted (placeholders and code references):** `changeme…`, `your-…`, `example…`, `placeholder…`, `dummy…`, `redacted…`, runs of `x` or `*`, `none`, `null`, `true`, `false`, `${VAR}`, `<value>`, `os.environ.get(…)`, and dotted references such as `self.default_password`.
+
+**Context snippets** (the 160-character `context` field) are redacted before they are truncated, so a credential that straddles the cut-off does not leak its tail.
+
+**Reporting.** `init` always prints the number of redacted findings and files. `init --report-secrets` also lists each finding as category, file and line. The report never contains values. Findings come from scanning the source of every parsed file, so a secret in plain code is reported even when it never reaches the output. The findings are stored with each parsed file, so cache hits report them too.
+
+**Logging.** A logging filter applies the same rules to every log message and traceback, as a second line of defence.
 
 ### Known Limitations
 1. **Multi-line credentials**: Connection strings split across string concatenation are not detected or redacted.
 2. **F-string interpolation**: `f"postgres://{user}:{password}@host"` will not have credentials redacted.
 3. **Commented-out lines**: Lines starting with `#` are NOT excluded from extraction (deliberate).
 4. **False positives**: Variables with names containing `host`, `port`, etc. as substrings are not guaranteed to be excluded by all patterns.
+5. **Multi-line key bodies**: Only the PEM header line is matched. Base64 key bodies are not.
+6. **Passwords containing `/`**: URL userinfo cannot contain `/`. URL-encode such passwords or they are not matched.
+7. **Bare values**: A secret with no key name and no known format (for example a random string on its own line) is not detected.
+8. **File paths**: Path names are not scanned. A secret in a file name is not redacted.
+9. **Skipped files**: Files excluded by size, language filter, or parse failure produce no findings and no output.
 
 ## Markdown Generation
 

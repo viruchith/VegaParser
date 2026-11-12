@@ -9,10 +9,20 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from repo_parser.models import ClassInfo, DatabaseEndpoint, ExternalCall, ExternalUrl, FunctionInfo, ParsedFile
+from repo_parser.models import (
+    ClassInfo,
+    DatabaseEndpoint,
+    ExternalCall,
+    ExternalUrl,
+    FunctionInfo,
+    ParsedFile,
+    SecretFinding,
+)
 
 CACHE_FILENAME = "parse_cache.json"
-CACHE_VERSION = 1
+# Bump whenever the cached shape or redaction rules change. Version 1 entries
+# were written before redaction existed and may contain raw secrets.
+CACHE_VERSION = 2
 
 # ── dict ↔ dataclass converters ──────────────────────────────────────────────
 
@@ -135,6 +145,10 @@ def parsed_file_from_dict(data: dict) -> ParsedFile:
         external_urls=[_external_url_from_dict(item) for item in data.get("external_urls", [])],
         database_endpoints=[_database_endpoint_from_dict(item) for item in data.get("database_endpoints", [])],
         internal_dependencies=list(data.get("internal_dependencies", [])),
+        secret_findings=[
+            SecretFinding(category=item["category"], line=int(item.get("line", 0)))
+            for item in data.get("secret_findings", [])
+        ],
     )
 
 

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 import typer
+from rich.table import Table
 
 from repo_parser.cache import (
     CACHE_VERSION,
@@ -131,6 +132,20 @@ def _parse_files(
     return parsed_files
 
 
+def _print_secret_report(rows: list[tuple[str, int, str]]) -> None:
+    """Print category, file and line for each likely secret. Values are never available here."""
+    if not rows:
+        console.print("[green]No likely secrets found.[/green]")
+        return
+    table = Table(title="Likely secrets (values hidden)")
+    table.add_column("Category", style="yellow")
+    table.add_column("File")
+    table.add_column("Line", justify="right")
+    for path, line, category in rows:
+        table.add_row(category, path, str(line) if line else "-")
+    console.print(table)
+
+
 @app.command("init")
 def init(
     path: Path = typer.Argument(
@@ -158,6 +173,11 @@ def init(
         min=0,
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug file logging."),
+    report_secrets: bool = typer.Option(
+        False,
+        "--report-secrets",
+        help="List likely secrets as category, file and line. Values are never printed.",
+    ),
 ) -> None:
     """Initialize parsing and generate the .rag_kb knowledge base."""
     log_path = setup_logging(verbose)
@@ -216,6 +236,16 @@ def init(
         f"[green]Generated knowledge base[/green] with [bold]{len(parsed_files)}[/bold] modules."
     )
     console.print(f"Project index: [cyan]{index_path}[/cyan]")
+    secret_rows = sorted(
+        ((pf.filepath, finding.line, finding.category) for pf in parsed_files for finding in pf.secret_findings),
+    )
+    files_with_secrets = len({path for path, _, _ in secret_rows})
+    logger.info("Likely secrets redacted: %d in %d file(s)", len(secret_rows), files_with_secrets)
+    console.print(
+        f"Likely secrets redacted: [bold]{len(secret_rows)}[/bold] in {files_with_secrets} file(s)."
+    )
+    if report_secrets:
+        _print_secret_report(secret_rows)
     console.print(f"Log file: [dim]{log_path}[/dim]")
 
 

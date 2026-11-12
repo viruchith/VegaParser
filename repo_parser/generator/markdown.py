@@ -11,6 +11,7 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from repo_parser.models import ParsedFile
+from repo_parser.redaction import redact_text
 from repo_parser.stack.detector import detect_stack
 
 logger = logging.getLogger(__name__)
@@ -128,7 +129,8 @@ class MarkdownGenerator:
                 }
             )
 
-        stack = detect_stack(self.root)
+        # Manifest lines such as `pkg @ https://user:token@host/...` can carry credentials.
+        stack = {key: [redact_text(item) for item in items] for key, items in detect_stack(self.root).items()}
         project_name = self.root.name
 
         all_urls = []

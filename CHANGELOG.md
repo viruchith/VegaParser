@@ -8,7 +8,31 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+#### Offline orientation evaluation
+- `scripts/evaluate_orientation.py` measures extraction precision/recall and top-k retrieval against
+  hand-written Python, TypeScript and Java corpora under `tests/eval_corpus/`. No LLM, no network.
+  Results and method: `docs/evaluation.md`.
+
+#### Secret redaction on every output surface
+- New `repo_parser/redaction.py` is the single source of redaction rules. It covers URL credentials
+  (including passwords containing `@`), query tokens, AWS/GitHub/Slack/Google/Stripe keys, JWTs,
+  PEM headers and `password`/`secret`/`token`/`api_key` assignments. Placeholders are kept.
+- Redaction runs on every parsed file, in the cache, module docs, project index, bundle and log.
+  Context snippets are redacted before truncation. Stack-detection output is redacted too.
+- `init --report-secrets` lists category, file and line for each likely secret. Values are never printed.
+  Every `init` prints the redacted total.
+
+### Changed
+
+- Parse cache version is now `2`. Version 1 caches are discarded because they were written before redaction.
+
 ### Fixed
+
+#### Endpoint extraction for Java, SQL and PLSQL
+- URL and database endpoint extraction now runs for Java, SQL and PLSQL files. Previously these
+  files skipped the endpoint step entirely.
 
 #### Parser stability on large repositories
 - Eliminated tree-sitter segmentation faults during repository indexing by:

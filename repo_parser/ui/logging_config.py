@@ -3,11 +3,32 @@
 from __future__ import annotations
 
 import logging
+import traceback
 from pathlib import Path
 from typing import Literal
 
+from repo_parser.redaction import redact_text
+
 LOG_FILENAME = "repo-parser.log"
 LogTarget = Literal["file", "console", "both"]
+
+
+class RedactingFilter(logging.Filter):
+    """Second line of defence: redact secrets from every log message and traceback.
+
+    Attached to handlers rather than the root logger, because logger-level
+    filters do not run for records propagated from child loggers.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        if record.exc_info:
+            message += "\n" + "".join(traceback.format_exception(*record.exc_info))
+        record.msg = redact_text(message)
+        record.args = ()
+        record.exc_info = None
+        record.exc_text = None
+        return True
 
 
 def setup_logging(
@@ -52,6 +73,9 @@ def setup_logging(
         console_handler.setLevel(log_level)
         console_handler.setFormatter(formatter)
         root.addHandler(console_handler)
+
+    for handler in root.handlers:
+        handler.addFilter(RedactingFilter())
 
     logging.getLogger("tree_sitter").setLevel(logging.ERROR)
 

@@ -13,6 +13,7 @@ from tree_sitter_language_pack import get_parser, has_language
 from repo_parser.cache import _dict_to_parsed_file
 from repo_parser.models import ParsedFile
 from repo_parser.parser.ts_compat import ParserAdapter
+from repo_parser.redaction import redact_parsed_file, scan_source
 from repo_parser.parser.dependencies import infer_internal_dependencies as infer_file_dependencies
 from repo_parser.parser.extractors.endpoints import enrich_parsed_file
 from repo_parser.parser.queries.common_queries import PROFILES, parse_common
@@ -154,6 +155,14 @@ class ParserEngine:
         return cache[lang_name]
 
     def parse_file(self, filepath: str, source: str) -> ParsedFile | None:
+        """Parse one file and redact it. Every output surface receives redacted data only."""
+        result = self._parse_file_unredacted(filepath, source)
+        if result is not None:
+            result.secret_findings = scan_source(source)
+            redact_parsed_file(result)
+        return result
+
+    def _parse_file_unredacted(self, filepath: str, source: str) -> ParsedFile | None:
         lang_name = detect_language(filepath)
         if lang_name is None:
             return None
@@ -167,10 +176,16 @@ class ParserEngine:
         if lang_name in ("env", "properties", "ini", "java", "sql", "plsql"):
             try:
                 result = parser_fn(filepath, source, None)
-                return result
             except Exception as exc:
                 logger.error("Failed to parse config file %s: %s", filepath, exc)
                 return None
+            # env/properties/ini enrich inside parse_env; the others need it here.
+            if lang_name in ("java", "sql", "plsql"):
+                try:
+                    enrich_parsed_file(result, source)
+                except Exception as exc:
+                    logger.error("Failed to enrich %s: %s", filepath, exc)
+            return result
 
         result = _parse_file_isolated(filepath, source, lang_name)
         if result is None:
