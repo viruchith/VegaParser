@@ -1,0 +1,148 @@
+{
+  "python_app": {
+    "root": "tests/eval_corpus/python_app",
+    "files": [
+      "app/__init__.py",
+      "app/api/__init__.py",
+      "app/api/routes.py",
+      "app/config.py",
+      "app/db.py",
+      "app/main.py",
+      "app/models.py",
+      "app/services/__init__.py",
+      "app/services/orders.py",
+      "app/services/payments.py",
+      "tests/test_orders.py"
+    ],
+    "symbols": [
+      "app/api/routes.py::create_order_route",
+      "app/api/routes.py::list_orders",
+      "app/config.py::Settings",
+      "app/config.py::load_settings",
+      "app/db.py::get_connection",
+      "app/main.py::main",
+      "app/models.py::Customer",
+      "app/models.py::Order",
+      "app/services/orders.py::OrderService",
+      "app/services/orders.py::OrderService.cancel_order",
+      "app/services/orders.py::OrderService.create_order",
+      "app/services/orders.py::calculate_total",
+      "app/services/payments.py::PaymentClient",
+      "app/services/payments.py::PaymentClient.charge",
+      "tests/test_orders.py::test_calculate_total_sums_amounts"
+    ],
+    "dependencies": [
+      ["app/api/routes.py", "app/models.py"],
+      ["app/api/routes.py", "app/services/orders.py"],
+      ["app/main.py", "app/api/routes.py"],
+      ["app/main.py", "app/config.py"],
+      ["app/services/orders.py", "app/models.py"],
+      ["app/services/payments.py", "app/config.py"],
+      ["tests/test_orders.py", "app/models.py"],
+      ["tests/test_orders.py", "app/services/orders.py"]
+    ],
+    "urls": [
+      ["app/services/payments.py", "https://payments.example.com/v1/charge"]
+    ]
+  },
+  "typescript_app": {
+    "root": "tests/eval_corpus/typescript_app",
+    "files": [
+      "src/__tests__/cart.test.ts",
+      "src/config.ts",
+      "src/index.ts",
+      "src/models/item.ts",
+      "src/routes/cart.ts",
+      "src/routes/health.ts",
+      "src/server.ts",
+      "src/services/cart.ts",
+      "src/services/inventory.ts",
+      "src/utils/format.ts"
+    ],
+    "symbols": [
+      "src/config.ts::AppConfig",
+      "src/config.ts::loadConfig",
+      "src/models/item.ts::Item",
+      "src/routes/cart.ts::registerCartRoutes",
+      "src/routes/health.ts::registerHealthRoute",
+      "src/server.ts::startServer",
+      "src/services/cart.ts::CartService",
+      "src/services/cart.ts::CartService.addItem",
+      "src/services/cart.ts::CartService.total",
+      "src/services/inventory.ts::InventoryClient",
+      "src/services/inventory.ts::InventoryClient.stockLevel",
+      "src/utils/format.ts::formatPrice"
+    ],
+    "dependencies": [
+      ["src/__tests__/cart.test.ts", "src/services/cart.ts"],
+      ["src/index.ts", "src/server.ts"],
+      ["src/routes/cart.ts", "src/services/cart.ts"],
+      ["src/server.ts", "src/config.ts"],
+      ["src/server.ts", "src/routes/cart.ts"],
+      ["src/server.ts", "src/routes/health.ts"],
+      ["src/services/cart.ts", "src/models/item.ts"]
+    ],
+    "urls": [
+      ["src/services/inventory.ts", "https://inventory.example.com/api/stock"]
+    ]
+  },
+  "java_app": {
+    "root": "tests/eval_corpus/java_app",
+    "files": [
+      "src/main/java/com/example/library/App.java",
+      "src/main/java/com/example/library/api/LibraryController.java",
+      "src/main/java/com/example/library/model/Author.java",
+      "src/main/java/com/example/library/model/Book.java",
+      "src/main/java/com/example/library/model/Loan.java",
+      "src/main/java/com/example/library/repo/BookRepository.java",
+      "src/main/java/com/example/library/service/BookService.java",
+      "src/main/java/com/example/library/service/CatalogClient.java",
+      "src/main/java/com/example/library/util/Isbn.java",
+      "src/test/java/com/example/library/service/BookServiceTest.java"
+    ],
+    "symbols": [
+      "src/main/java/com/example/library/App.java::App",
+      "src/main/java/com/example/library/App.java::App.main",
+      "src/main/java/com/example/library/api/LibraryController.java::LibraryController",
+      "src/main/java/com/example/library/api/LibraryController.java::LibraryController.getBook",
+      "src/main/java/com/example/library/api/LibraryController.java::LibraryController.listBooks",
+      "src/main/java/com/example/library/model/Author.java::Author",
+      "src/main/java/com/example/library/model/Book.java::Book",
+      "src/main/java/com/example/library/model/Book.java::Book.checkOut",
+      "src/main/java/com/example/library/model/Book.java::Book.getIsbn",
+      "src/main/java/com/example/library/model/Book.java::Book.getTitle",
+      "src/main/java/com/example/library/model/Book.java::Book.isCheckedOut",
+      "src/main/java/com/example/library/model/Loan.java::Loan",
+      "src/main/java/com/example/library/repo/BookRepository.java::BookRepository",
+      "src/main/java/com/example/library/repo/BookRepository.java::BookRepository.findByIsbn",
+      "src/main/java/com/example/library/repo/BookRepository.java::BookRepository.save",
+      "src/main/java/com/example/library/service/BookService.java::BookService",
+      "src/main/java/com/example/library/service/BookService.java::BookService.checkout",
+      "src/main/java/com/example/library/service/BookService.java::BookService.findByIsbn",
+      "src/main/java/com/example/library/service/CatalogClient.java::CatalogClient",
+      "src/main/java/com/example/library/service/CatalogClient.java::CatalogClient.fetchTitle",
+      "src/main/java/com/example/library/util/Isbn.java::Isbn",
+      "src/main/java/com/example/library/util/Isbn.java::Isbn.validate",
+      "src/test/java/com/example/library/service/BookServiceTest.java::BookServiceTest",
+      "src/test/java/com/example/library/service/BookServiceTest.java::BookServiceTest.checkoutMarksBookAsBorrowed"
+    ],
+    "dependencies": [
+      ["src/main/java/com/example/library/App.java", "src/main/java/com/example/library/api/LibraryController.java"],
+      ["src/main/java/com/example/library/App.java", "src/main/java/com/example/library/repo/BookRepository.java"],
+      ["src/main/java/com/example/library/App.java", "src/main/java/com/example/library/service/BookService.java"],
+      ["src/main/java/com/example/library/App.java", "src/main/java/com/example/library/service/CatalogClient.java"],
+      ["src/main/java/com/example/library/api/LibraryController.java", "src/main/java/com/example/library/model/Book.java"],
+      ["src/main/java/com/example/library/api/LibraryController.java", "src/main/java/com/example/library/service/BookService.java"],
+      ["src/main/java/com/example/library/repo/BookRepository.java", "src/main/java/com/example/library/model/Book.java"],
+      ["src/main/java/com/example/library/service/BookService.java", "src/main/java/com/example/library/model/Book.java"],
+      ["src/main/java/com/example/library/service/BookService.java", "src/main/java/com/example/library/repo/BookRepository.java"],
+      ["src/main/java/com/example/library/service/BookService.java", "src/main/java/com/example/library/util/Isbn.java"],
+      ["src/test/java/com/example/library/service/BookServiceTest.java", "src/main/java/com/example/library/model/Book.java"],
+      ["src/test/java/com/example/library/service/BookServiceTest.java", "src/main/java/com/example/library/repo/BookRepository.java"],
+      ["src/test/java/com/example/library/service/BookServiceTest.java", "src/main/java/com/example/library/service/BookService.java"]
+    ],
+    "urls": [
+      ["src/main/java/com/example/library/service/CatalogClient.java", "https://catalog.example.com/v2/books"]
+    ]
+  }
+}

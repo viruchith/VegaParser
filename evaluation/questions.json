@@ -1,0 +1,135 @@
+[
+  {
+    "id": "py-01",
+    "repo": "python_app",
+    "question": "Where does the application start?",
+    "expected_files": ["app/main.py"],
+    "expected_symbols": ["app/main.py::main"]
+  },
+  {
+    "id": "py-02",
+    "repo": "python_app",
+    "question": "Where are orders created and stored?",
+    "expected_files": ["app/services/orders.py", "app/api/routes.py"],
+    "expected_symbols": ["app/services/orders.py::OrderService.create_order"]
+  },
+  {
+    "id": "py-03",
+    "repo": "python_app",
+    "question": "Which code calls the external payment provider?",
+    "expected_files": ["app/services/payments.py"],
+    "expected_symbols": ["app/services/payments.py::PaymentClient.charge"]
+  },
+  {
+    "id": "py-04",
+    "repo": "python_app",
+    "question": "Where is the order total calculated?",
+    "expected_files": ["app/services/orders.py"],
+    "expected_symbols": ["app/services/orders.py::calculate_total"]
+  },
+  {
+    "id": "py-05",
+    "repo": "python_app",
+    "question": "Where are configuration values loaded from environment variables?",
+    "expected_files": ["app/config.py"],
+    "expected_symbols": ["app/config.py::load_settings"]
+  },
+  {
+    "id": "py-06",
+    "repo": "python_app",
+    "question": "Which tests cover order totals?",
+    "expected_files": ["tests/test_orders.py"],
+    "expected_symbols": ["tests/test_orders.py::test_calculate_total_sums_amounts"]
+  },
+  {
+    "id": "py-07",
+    "repo": "python_app",
+    "question": "What fields does an order have?",
+    "expected_files": ["app/models.py"],
+    "expected_symbols": ["app/models.py::Order"]
+  },
+  {
+    "id": "ts-01",
+    "repo": "typescript_app",
+    "question": "Where does the server start?",
+    "expected_files": ["src/index.ts", "src/server.ts"],
+    "expected_symbols": ["src/server.ts::startServer"]
+  },
+  {
+    "id": "ts-02",
+    "repo": "typescript_app",
+    "question": "How is the cart total computed?",
+    "expected_files": ["src/services/cart.ts"],
+    "expected_symbols": ["src/services/cart.ts::CartService.total"]
+  },
+  {
+    "id": "ts-03",
+    "repo": "typescript_app",
+    "question": "Which code calls the inventory API?",
+    "expected_files": ["src/services/inventory.ts"],
+    "expected_symbols": ["src/services/inventory.ts::InventoryClient.stockLevel"]
+  },
+  {
+    "id": "ts-04",
+    "repo": "typescript_app",
+    "question": "Where are cart HTTP routes registered?",
+    "expected_files": ["src/routes/cart.ts"],
+    "expected_symbols": ["src/routes/cart.ts::registerCartRoutes"]
+  },
+  {
+    "id": "ts-05",
+    "repo": "typescript_app",
+    "question": "How is a price formatted for display?",
+    "expected_files": ["src/utils/format.ts"],
+    "expected_symbols": ["src/utils/format.ts::formatPrice"]
+  },
+  {
+    "id": "ts-06",
+    "repo": "typescript_app",
+    "question": "What is the shape of a cart item?",
+    "expected_files": ["src/models/item.ts"],
+    "expected_symbols": ["src/models/item.ts::Item"]
+  },
+  {
+    "id": "java-01",
+    "repo": "java_app",
+    "question": "Where does the application start?",
+    "expected_files": ["src/main/java/com/example/library/App.java"],
+    "expected_symbols": ["src/main/java/com/example/library/App.java::App.main"]
+  },
+  {
+    "id": "java-02",
+    "repo": "java_app",
+    "question": "Where is the checkout logic?",
+    "expected_files": ["src/main/java/com/example/library/service/BookService.java"],
+    "expected_symbols": ["src/main/java/com/example/library/service/BookService.java::BookService.checkout"]
+  },
+  {
+    "id": "java-03",
+    "repo": "java_app",
+    "question": "Which class talks to the external catalog service?",
+    "expected_files": ["src/main/java/com/example/library/service/CatalogClient.java"],
+    "expected_symbols": ["src/main/java/com/example/library/service/CatalogClient.java::CatalogClient.fetchTitle"]
+  },
+  {
+    "id": "java-04",
+    "repo": "java_app",
+    "question": "How are books persisted?",
+    "expected_files": ["src/main/java/com/example/library/repo/BookRepository.java"],
+    "expected_symbols": ["src/main/java/com/example/library/repo/BookRepository.java::BookRepository.save"]
+  },
+  {
+    "id": "java-05",
+    "repo": "java_app",
+    "question": "Where is the ISBN validated?",
+    "expected_files": ["src/main/java/com/example/library/util/Isbn.java"],
+    "expected_symbols": ["src/main/java/com/example/library/util/Isbn.java::Isbn.validate"]
+  },
+  {
+    "id": "java-06",
+    "repo": "java_app",
+    "question": "Which REST endpoint returns a book?",
+    "expected_files": ["src/main/java/com/example/library/api/LibraryController.java"],
+    "expected_symbols": ["src/main/java/com/example/library/api/LibraryController.java::LibraryController.getBook"]
+  }
+]
