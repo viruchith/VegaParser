@@ -124,6 +124,16 @@ See `repo_parser/parser/registry.py` for the full mapping. Highlights:
 | `.sh`, `.bash` | bash |
 | `.env`, `.properties`, `.ini` | env / properties / ini |
 
+### Language tiers
+
+| Tier | Languages | Evidence |
+|------|-----------|----------|
+| Supported | Python, TypeScript/JavaScript, Java | Measured in `docs/evaluation.md` against the hand-labelled corpus in `tests/eval_corpus/` |
+| Experimental | Go, Rust, C#, Ruby, Dockerfile, YAML / Kubernetes, SQL, PL/SQL, Terraform / HCL, Bash / Shell, env / properties / ini | Present in `tests/fixtures/` and parsed in tests. Accuracy not measured |
+| Untested | C, C++, PHP, Kotlin, Scala, Swift | Extension mapping and a generic profile only. No fixture or extraction test |
+
+Only supported languages have measured extraction accuracy. Dependency resolution for the other tiers is not measured.
+
 ## Tree-sitter Parsing Strategy
 
 Parsing uses `tree-sitter-language-pack` with **AST node traversal** (not the Query API).
@@ -264,10 +274,15 @@ repo-parser bundle [PATH] [OPTIONS]
   - `.rag_kb/`
   - `repo-parser.log`
 - JSON output includes `artifact_rag_kb` and `artifact_log` paths for quality audits
+- `--local PATH` benchmarks a local directory. It is copied into the workspace (never modified).
+- Each row records `peak_rss_bytes` (sampled peak memory; Windows sums the venv launcher's process tree) and `output_bytes` (size of `.rag_kb/`).
+- A run is `ok` only with modules and `project_index.md` present. Otherwise the status is `empty output`, and the script exits `1`.
 
 ## Error Handling
 
-- Unparseable files: log warning, skip (don't fail entire run)
+- Unparseable files: logged with an error, listed in the console summary, and not cached. The knowledge base is still written for everything else. `init` exits `2` so CI and scripts see the failure. The next run retries these files.
+- Unreadable files: reported the same way as parse failures.
+- Parallel parsing is bounded: at most `4 × workers` tasks are in flight. Parallel and sequential output is byte-identical (tested).
 - Unsupported extension: excluded at scan time
 - Missing tree-sitter grammar: skip with warning
 
@@ -276,10 +291,10 @@ repo-parser bundle [PATH] [OPTIONS]
 Automated with **pytest**. Run the full suite:
 
 ```bash
-pytest --cov=repo_parser --cov-report=term-missing --cov-fail-under=91
+pytest --cov=repo_parser --cov-report=term-missing --cov-fail-under=80
 ```
 
-Current coverage: **91 %** across `repo_parser/` (342 tests).
+CI enforces a coverage floor of 80 % (`--cov-fail-under=80`). This document does not state a measured figure. Measure it with the command above.
 
 ### Test layout
 

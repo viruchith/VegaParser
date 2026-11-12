@@ -3,11 +3,10 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![CI](https://github.com/viruchith/VegaParser/actions/workflows/ci.yml/badge.svg)](https://github.com/viruchith/VegaParser/actions/workflows/ci.yml)
-[![Coverage: 91%](https://img.shields.io/badge/coverage-91%25-brightgreen.svg)](#testing)
 
 **VegaParser** is a command-line tool that turns any local code repository into a structured **Markdown knowledge base** optimised for Large Language Models. It walks your source tree, parses every file with **Tree-sitter AST analysis**, enriches results with regex-based endpoint and secret extraction, and writes clean, YAML-frontmatted Markdown that can be injected directly into an LLM's context window.
 
-> **v0.2.0** — incremental caching, hardened secret redaction, 342-test suite (91 % coverage).
+> **v0.3.0** — context budgeting for `bundle`, secret redaction on every output, exact cache lifecycle, and scale validation. Breaking changes are listed in [CHANGELOG.md](CHANGELOG.md).
 > See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 
 ---
@@ -38,7 +37,7 @@
 
 | Feature | Details |
 |---------|---------|
-| **Tree-sitter AST parsing** | Semantic extraction — imports, classes, methods, docstrings, signatures — across 20+ languages |
+| **Tree-sitter AST parsing** | Semantic extraction — imports, classes, methods, docstrings, signatures. Measured for Python, TypeScript/JavaScript and Java; other languages are experimental or untested (see [Supported Languages](#supported-languages)) |
 | **RAG-optimised Markdown** | Per-module `.md` files with YAML frontmatter; ready for vector store ingestion or direct injection |
 | **Project-wide index** | `project_index.md` aggregates tech stack, dependency graph, all external URLs, and DB endpoints |
 | **LLM context bundle** | `bundle` command concatenates everything into a single `full_repo_context.md` with size/token estimates |
@@ -101,6 +100,16 @@
 | **Database** | SQL, PL/SQL | `*.sql` `*.plsql` `*.pls` `*.pkb` `*.pks` |
 | **Config / Env** | Environment files, Properties, INI | `.env` `.env.*` `*.properties` `*.ini` `*.cfg` |
 | **Shell** | Bash, Makefile | `*.sh` `*.bash` `*.zsh` `Makefile` |
+
+### Language tiers
+
+The tier says how much evidence backs each language. Only **supported** languages have measured extraction accuracy.
+
+| Tier | Languages | Evidence |
+|------|-----------|----------|
+| **Supported** | Python, TypeScript/JavaScript, Java | Hand-labelled evaluation corpus (`tests/eval_corpus/`). Precision and recall are measured in [`docs/evaluation.md`](docs/evaluation.md). Also covered by the fixtures. |
+| **Experimental** | Go, Rust, C#, Ruby, Dockerfile, YAML / Kubernetes, SQL, PL/SQL, Terraform / HCL, Bash / Shell, env / properties / ini | A file is in the fixture set (`tests/fixtures/`) and parses in tests. Extraction accuracy is not measured. |
+| **Untested** | C, C++, PHP, Kotlin, Scala, Swift | Recognised by file extension and a generic parser profile. No fixture or extraction test in this repo. Expect gaps. |
 
 Language aliases accepted by `--languages`: `py`, `js`, `ts`, `golang`, `rs`, `k8s`, `kubernetes`, `docker`, `dockerfile`, `tf`, `terraform`, `shell`, `env`, `plsql`, …
 
@@ -183,6 +192,9 @@ Scans `PATH` (default: current directory), parses every supported source file, a
 | `--log-target` | — | `file\\|console\\|both` | `file` | Choose where logs are written |
 | `--force` / `--no-cache` | — | flag | off | Bypass the incremental cache; reparse every file from scratch |
 | `--report-secrets` | — | flag | off | List likely secrets as category, file and line. Values are never printed. |
+| `--workers` | `-j` | int | `0` | Parallel parse workers. `0` = auto (min(CPU count, 8)); `1` = sequential. Tests confirm `-j 1` and `-j 8` write byte-identical output. |
+
+**Exit codes:** `0` on success. `2` when one or more files could not be parsed. The knowledge base is still written, the failed files are listed, and they are retried on the next run.
 
 **Examples:**
 
@@ -440,7 +452,7 @@ VegaParser/
 ├── docs/
 │   └── tree-sitter-query-api-evaluation.md
 ├── tests/
-│   ├── fixtures/                   ← sample corpus (17 files, 11 languages)
+│   ├── fixtures/                   ← sample corpus (21 files)
 │   ├── unit/                       ← one test module per source module (17 modules)
 │   └── integration/                ← end-to-end init + bundle + cache tests
 └── repo_parser/
@@ -724,13 +736,13 @@ pytest tests/unit/test_endpoints_security.py -v
 pytest tests/integration/ -v
 ```
 
-Current status: **342 tests · 91 % coverage** on `repo_parser/`.
-
 The CI pipeline (`.github/workflows/ci.yml`) runs on every push and pull request against `main` across Python 3.10, 3.11, and 3.12. It includes three jobs:
 
 - **build** — builds the sdist + wheel and verifies `repo-parser --help` works from the installed wheel
-- **test** — runs the full pytest suite with coverage on all three Python versions; fails if coverage drops below 91 %
+- **test** — runs the full pytest suite with coverage on all three Python versions; CI enforces a coverage floor of 80 % (`--cov-fail-under=80`)
 - **coverage** — generates and uploads an HTML coverage report artifact (Python 3.12 only)
+
+No coverage percentage is published here. Run `pytest --cov=repo_parser --cov-report=term-missing` to measure it locally.
 
 ---
 

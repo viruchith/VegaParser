@@ -50,13 +50,13 @@ The 19 questions cover entry points, business logic, external calls, configurati
 
 ## Baseline findings
 
-These findings were measured on the code before workstreams 2–5. Status is noted for each.
+These findings were measured on the code before the 0.3.0 changes. Status is noted for each.
 
-1. **Dependency recall was 0%.** *Fixed in workstream 4.* The CLI called `ParserEngine.infer_internal_dependencies`, which only matches bare file stems. Dotted Python imports (`app.models`) and relative JS/TS imports (`./server`) never resolved. The engine method now delegates to the richer resolver in `repo_parser/parser/dependencies.py`, which `init` and this script both use. Recall is 85.7% with 100% precision. The 4 misses are in the TypeScript and Java corpora (see the per-repo table). Import-based ranking in `bundle` depends on this resolver.
-2. **Java URLs were never extracted.** *Fixed in workstream 2.* `ParserEngine.parse_file` returned early for `java`, `sql` and `plsql` without running endpoint enrichment. Those files now get the same endpoint extraction and redaction as other languages. URL recall for this corpus went from 66.7% to 100%.
-3. **TypeScript interfaces are not extracted as symbols.** `AppConfig` and `Item` are missed.
-4. **Full-bundle retrieval has recall but no precision.** Every question gets every file, so precision is a fraction of the file count. This is the problem the budgeted bundle must solve.
-5. **Keyword retrieval misses questions whose answer shares no words with the question.** "Where does the application start?" returns nothing for both `python_app` (`main`) and `java_app` (`App.main`), because neither file contains the word "start" or "application".
+1. **Dependency recall was 0%.** *Fixed in 0.3.0.* The CLI called `ParserEngine.infer_internal_dependencies`, which only matches bare file stems. Dotted Python imports (`app.models`) and relative JS/TS imports (`./server`) never resolved. The engine method now delegates to the richer resolver in `repo_parser/parser/dependencies.py`, which `init` and this script both use. Recall is 85.7% with 100% precision. The 4 misses are in the TypeScript and Java corpora (see the per-repo table). Import-based ranking in `bundle` depends on this resolver.
+2. **Java URLs were never extracted.** *Fixed in 0.3.0.* `ParserEngine.parse_file` returned early for `java`, `sql` and `plsql` without running endpoint enrichment. Those files now get the same endpoint extraction and redaction as other languages. URL recall for this corpus went from 66.7% to 100%.
+3. **TypeScript interfaces are not extracted as symbols.** `AppConfig` and `Item` were missed. *Still open:* the symbols table still shows 2 misses for the TypeScript corpus.
+4. **Full-bundle retrieval has recall but no precision.** Every question gets every file, so precision is a fraction of the file count. *Still open for the unlimited bundle* (precision 10.7% above). A budgeted bundle (`bundle --max-tokens N --query ...`) narrows the pack, but this script does not measure budgeted packs.
+5. **Keyword retrieval misses questions whose answer shares no words with the question.** *Still open:* the entry-point questions (`py-01`, `java-01`) score 0%. "Where does the application start?" returns nothing for both `python_app` (`main`) and `java_app` (`App.main`), because neither file contains the word "start" or "application".
 
 <!-- BEGIN GENERATED RESULTS -->
 ## Results

@@ -47,7 +47,7 @@ pip install -r requirements.txt -r requirements-dev.txt
 pip install -e .                 # editable install for the console script
 
 # Verify
-pytest                           # 342 tests should pass
+pytest                           # the full suite should pass
 repo-parser --help
 ```
 
@@ -58,7 +58,7 @@ repo-parser --help
 | `typer` | CLI framework — `app.command()` decorators, argument parsing |
 | `rich` | Terminal output — `Console`, progress bar, spinner |
 | `tree-sitter` | Tree-sitter Python bindings |
-| `tree-sitter-language-pack` | Pre-built grammars for 30+ languages in one wheel |
+| `tree-sitter-language-pack` | Pre-built grammars for many languages in one wheel. Which languages VegaParser supports is in `README.md → Language tiers` |
 | `pathspec` | `.gitignore` pattern matching |
 | `Jinja2` | Markdown template rendering |
 | `PyYAML` | YAML parsing in tests (frontmatter validation) |
@@ -808,7 +808,7 @@ pytest --snapshot-update                  # regenerate snapshots
 1. **Fork** the repo and create a feature branch: `git checkout -b feat/my-feature`
 2. **Make your changes** — see the module reference above for where things live
 3. **Write or update tests** — every new code path needs a test
-4. **Run the full suite:** `pytest --cov=repo_parser --cov-fail-under=91`
+4. **Run the full suite:** `pytest --cov=repo_parser --cov-fail-under=80` (the CI floor; no published figure)
 5. **Run against a real repo:** `repo-parser init /some/project --verbose`
 6. **Commit with a clear message** following the convention:
    - `feat(module): short description` for new features

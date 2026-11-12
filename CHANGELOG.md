@@ -8,6 +8,25 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+---
+
+## [0.3.0] — 2026-11-12
+
+### Breaking changes
+Read this before upgrading. Scripts and CI that depend on exit codes or bundle output are affected.
+
+- **`init` exits `2` when a file fails to parse.** The knowledge base is still written. Before, a partial parse exited `0`.
+- **`bundle` order is relevance order**, not alphabetical. Index first. Budgets now apply, so output for the same repo can change.
+- **Bundle token estimate is `characters / 3`** (was `characters // 4`). It is still an approximation, not a tokenizer count.
+- **Parse cache is version `3`**, stored in one file, `.rag_kb/parse_cache.json`. Older caches are discarded, so the first `init` after upgrading reparses everything.
+- **Removed from the library API:** `repo_parser.cache.IndexCache`, `compute_hash` and `file_signature`.
+  The `.rag_kb/.cache/manifest.json` file from 0.2.0 is no longer read or written. Delete it if present.
+- **Benchmark status is stricter.** A run with no modules or no `project_index.md` is `empty output`, and the script exits `1`.
+- **Language support is now tiered.** Only Python, TypeScript/JavaScript and Java have measured extraction accuracy.
+  The earlier "20+ languages" claim is removed. See `README.md → Language tiers`.
+- **Coverage claims are removed.** The README and DESIGN no longer state a coverage figure or a test count.
+  CI still enforces a floor of 80 % (`--cov-fail-under=80`). The CI matrix is unchanged.
+
 ### Added
 
 #### Context budgeting for `bundle`
