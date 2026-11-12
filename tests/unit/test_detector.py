@@ -167,3 +167,22 @@ def test_dedupe_prioritize_spring_deduplicates():
 def test_dedupe_empty():
     from repo_parser.stack.detector import _dedupe_prioritize_spring
     assert _dedupe_prioritize_spring([]) == []
+
+
+def test_missing_root_pom_is_not_reported(tmp_path, caplog):
+    """No pom.xml at the root must not produce a parse warning."""
+    with caplog.at_level("WARNING"):
+        detect_stack(tmp_path)
+    assert not [r for r in caplog.records if "pom.xml" in r.getMessage()]
+
+
+def test_root_pom_is_read_when_present(tmp_path):
+    (tmp_path / "pom.xml").write_text(
+        '<project xmlns="http://maven.apache.org/POM/4.0.0">'
+        "<dependencies><dependency><groupId>org.example</groupId>"
+        "<artifactId>lib</artifactId><version>1.0</version></dependency></dependencies>"
+        "</project>",
+        encoding="utf-8",
+    )
+    stack = detect_stack(tmp_path)
+    assert any("lib" in item for item in stack["java_packages"])

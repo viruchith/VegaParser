@@ -1,4 +1,4 @@
-"""Integration tests for the init + bundle pipeline (Python API)."""
+"""Integration tests for the init + bundle pipeline (through the real CLI)."""
 
 from __future__ import annotations
 
@@ -6,44 +6,27 @@ import shutil
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
+from repo_parser.cli import app
 from repo_parser.generator.bundle import bundle_knowledge_base, bundle_stats
-from repo_parser.generator.markdown import MarkdownGenerator, sanitize_filename
-from repo_parser.parser.engine import ParserEngine
-from repo_parser.parser.registry import detect_language
-from repo_parser.traversal.scanner import RepositoryScanner
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
+runner = CliRunner()
 
 
-def run_init(root: Path, lang_filter: set[str] | None = None) -> list:
-    """Run the init pipeline directly via the Python API."""
-    scanner = RepositoryScanner(root, languages=lang_filter)
-    files = scanner.discover()
-    engine = ParserEngine()
-
-    parsed_files = []
-    for rel_path in files:
-        rel_str = rel_path.as_posix()
-        if lang_filter:
-            detected = detect_language(rel_str)
-            if detected not in lang_filter:
-                continue
-        content = scanner.read_file(rel_path)
-        if content is None:
-            continue
-        result = engine.parse_file(rel_str, content)
-        if result is not None:
-            parsed_files.append(result)
-
-    engine.infer_internal_dependencies(parsed_files)
-    generator = MarkdownGenerator(root)
-    generator.generate(parsed_files)
-    return parsed_files
+def run_init(root: Path, languages: str | None = None) -> None:
+    """Run `init` through the CLI with logs on the console (no log file written)."""
+    args = ["init", str(root), "--log-target", "console"]
+    if languages:
+        args += ["--languages", languages]
+    result = runner.invoke(app, args)
+    assert result.exit_code == 0, result.output
 
 
 @pytest.fixture()
-def fixtures_copy(tmp_path):
+def fixtures_copy(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     dest = tmp_path / "repo"
     shutil.copytree(FIXTURES_DIR, dest)
     return dest
@@ -55,8 +38,7 @@ def _module_names(root: Path) -> list[str]:
 
 
 def test_init_creates_modules_and_index(fixtures_copy):
-    parsed = run_init(fixtures_copy)
-    assert parsed
+    run_init(fixtures_copy)
 
     modules_dir = fixtures_copy / ".rag_kb" / "modules"
     assert modules_dir.is_dir()
@@ -81,16 +63,16 @@ def test_bundle_after_init(fixtures_copy):
 
 
 def test_languages_filter_only_indexes_python(fixtures_copy, snapshot):
-    parsed = run_init(fixtures_copy, lang_filter={"python"})
-    assert parsed
-    assert all(pf.language == "python" for pf in parsed)
+    run_init(fixtures_copy, languages="python")
 
     names = _module_names(fixtures_copy)
+    assert names
     assert all(name.endswith("_py.md") for name in names)
     assert names == snapshot
 
 
-def test_init_is_deterministic(tmp_path):
+def test_init_is_deterministic(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     first = tmp_path / "first"
     second = tmp_path / "second"
     shutil.copytree(FIXTURES_DIR, first)
@@ -99,15 +81,15 @@ def test_init_is_deterministic(tmp_path):
     run_init(first)
     run_init(second)
 
-    first_modules = {p.name: p.stat().st_size for p in (first / ".rag_kb" / "modules").glob("*.md")}
-    second_modules = {p.name: p.stat().st_size for p in (second / ".rag_kb" / "modules").glob("*.md")}
+    first_modules = {p.name: p.read_bytes() for p in (first / ".rag_kb" / "modules").glob("*.md")}
+    second_modules = {p.name: p.read_bytes() for p in (second / ".rag_kb" / "modules").glob("*.md")}
 
     assert first_modules == second_modules
 
 
 def test_init_twice_same_root_is_stable(fixtures_copy):
     run_init(fixtures_copy)
-    first = {p.name: p.stat().st_size for p in (fixtures_copy / ".rag_kb" / "modules").glob("*.md")}
+    first = {p.name: p.read_bytes() for p in (fixtures_copy / ".rag_kb" / "modules").glob("*.md")}
     run_init(fixtures_copy)
-    second = {p.name: p.stat().st_size for p in (fixtures_copy / ".rag_kb" / "modules").glob("*.md")}
+    second = {p.name: p.read_bytes() for p in (fixtures_copy / ".rag_kb" / "modules").glob("*.md")}
     assert first == second

@@ -79,6 +79,9 @@ def _parse_maven_pom(root: Path) -> list[str]:
     seen_paths: set[str] = set()
 
     for pom in pom_paths[:10]:
+        if not pom.is_file():
+            # The root candidate is always listed; skip it when there is no root pom.
+            continue
         path_key = str(pom.resolve())
         if path_key in seen_paths:
             continue

@@ -44,7 +44,7 @@
 | **LLM context bundle** | `bundle` command concatenates everything into a single `full_repo_context.md` with size/token estimates |
 | **Endpoint discovery** | Detects HTTP URLs, connection URIs, `.env` variables, JDBC strings, `create_engine()` calls, KV config |
 | **Secret redaction** | Likely secrets (URL passwords, query tokens, common key formats, credential assignments) are replaced with `***` before any output file is written |
-| **Incremental caching** | SHA-256 manifest skips unchanged files on re-runs; stale module files are automatically removed |
+| **Incremental caching** | SHA-256 of each file's bytes; unchanged files reuse the cached parse on re-runs; modules for deleted or renamed sources are removed |
 | **Infrastructure-aware** | Dockerfile, Kubernetes manifests, Terraform/HCL, PL/SQL heuristics |
 | **Smart traversal** | Respects `.gitignore`, skips hidden dirs, `node_modules`, binaries, and the `.rag_kb/` output dir itself |
 | **Rich progress UI** | Spinner + progress bar; all logs written to `repo-parser.log`, never to stdout |
@@ -70,8 +70,8 @@
 │    • returns ParsedFile dataclass                                   │
 │         │                                                           │
 │         ▼  list[ParsedFile]                                         │
-│  IndexCache (incremental)                                           │
-│    • SHA-256 hash per file → .rag_kb/.cache/manifest.json           │
+│  Parse cache (incremental)                                          │
+│    • SHA-256 of each file's bytes → .rag_kb/parse_cache.json        │
 │    • unchanged files: restore ParsedFile from cache, skip parse     │
 │         │                                                           │
 │         ▼                                                           │
@@ -200,13 +200,17 @@ repo-parser init . --force --verbose
 repo-parser init . -l py,go,docker,tf
 ```
 
-**Output on success:**
+**Output on success** (second run on an unchanged repo):
 
 ```
-Generated knowledge base with 42 modules (38 parsed, 4 from cache).
+Generated knowledge base with 20 modules.
+Parse cache: 20 reused, 0 parsed, 0 stale module(s) removed.
 Project index: /your/project/.rag_kb/project_index.md
+Likely secrets redacted: 3 in 2 file(s).
 Log file: /your/project/repo-parser.log
 ```
+
+The `Log file` line is omitted when `--log-target console` is used.
 
 ---
 
@@ -268,8 +272,7 @@ After `init`, the following tree is created inside your repository:
 │   ├── src_db_models_py.md
 │   ├── Dockerfile.md
 │   └── …
-├── .cache/
-│   └── manifest.json         ← incremental cache (SHA-256 hashes + serialised ParsedFile)
+├── parse_cache.json          ← incremental cache (SHA-256 per file + serialised ParsedFile)
 └── full_repo_context.md      ← created by `bundle`
 ```
 
@@ -338,22 +341,26 @@ Aggregates across all parsed files:
 
 ## Incremental Caching
 
-By default, `init` maintains a SHA-256 content-hash manifest at `.rag_kb/.cache/manifest.json`. On subsequent runs:
+`init` keeps one cache at `.rag_kb/parse_cache.json`. Each file entry stores the SHA-256 of the file's raw bytes, the module file it produced, and the serialised parse result. On subsequent runs:
 
 | File state | Action |
 |-----------|--------|
-| **Unchanged** (hash matches, module `.md` exists) | Restore `ParsedFile` from cache — Tree-sitter is not invoked |
-| **Changed** (hash mismatch) | Re-parse; update manifest entry |
-| **New** | Parse normally; add manifest entry |
-| **Deleted** (in manifest but not on disk) | Remove module `.md`; remove from manifest |
+| **Unchanged** (SHA-256 matches) | Restore the parse result from the cache — Tree-sitter is not invoked |
+| **Changed** (SHA-256 differs) | Re-parse; update the entry |
+| **New** | Parse; add an entry |
+| **Deleted or renamed** | Its module file is removed (see below) |
 
-The cache is transparent — output is byte-identical to a full parse. Use `--force`/`--no-cache` to bypass it:
+**Whole-cache invalidation.** The cache is ignored, and every file is reparsed, when any of these differ from the current run: the cache layout version, the VegaParser version, or the `--languages` filter. A corrupt or unreadable cache is also ignored and rebuilt. Writes are atomic (temporary file, then rename), so an interrupted run cannot leave a half-written cache.
+
+**Stale module cleanup.** Only files directly under `.rag_kb/modules/` whose first two lines are the generated header (`---` then `filepath:`) are candidates for removal, and only when no current source file maps to them. Files you add to `modules/` yourself are never touched. `project_index.md` and `full_repo_context.md` are always rewritten, never deleted.
+
+**Bypassing the cache.** `--force` (alias `--no-cache`) reparses every file and rewrites the cache:
 
 ```bash
-repo-parser init --force          # full reparse, then update cache
+repo-parser init --force          # full reparse, then rewrite the cache
 ```
 
-On a warm cache, re-running `init` on an unchanged `tests/fixtures/` produces **zero `parse_file` calls** — only project index regeneration occurs.
+On a warm cache, re-running `init` on an unchanged `tests/fixtures/` parses **zero files**. The output reports `0 parsed`. A warm run writes the same bytes as a `--force` run; `test_warm_cache_output_matches_full_reparse` checks this. The lifecycle tests in `tests/integration/test_incremental_indexing.py` count `ParserEngine.parse_file` calls to show which files were reparsed.
 
 ---
 
@@ -423,7 +430,7 @@ VegaParser/
 └── repo_parser/
     ├── cli.py                      ← Typer app: init, bundle
     ├── models.py                   ← ParsedFile, ClassInfo, FunctionInfo, …
-    ├── cache.py                    ← IndexCache (incremental manifest)
+    ├── cache.py                    ← parse cache (versioned, SHA-256 per file)
     ├── traversal/
     │   └── scanner.py              ← RepositoryScanner
     ├── parser/
@@ -587,9 +594,9 @@ cannot delete each other's `.rag_kb` state during parallel runs.
 ### Cold vs warm runs
 
 VegaParser has a file-level incremental cache (`parse_cache.json` inside `.rag_kb/`).
-Each cache entry stores the file's `mtime_ns` and `size`.
-On re-index, if those values match, the tree-sitter parse step is skipped entirely and
-the cached `ParsedFile` record is reused — only markdown generation runs.
+Each cache entry stores the SHA-256 of the file's bytes.
+On re-index, if the hash matches, the tree-sitter parse step is skipped and the
+cached `ParsedFile` record is reused — only markdown generation runs.
 
 The benchmark exploits this to measure two distinct performance profiles:
 
@@ -597,6 +604,7 @@ The benchmark exploits this to measure two distinct performance profiles:
 |---|---|---|---|
 | **Cold** | `.rag_kb` deleted before every run | No | Full parse: file I/O + tree-sitter + markdown write |
 | **Warm** | `.rag_kb` kept from the cold run | Yes (all cache hits) | Incremental reindex: cache load + markdown write only |
+
 
 **Enabling a warm pass:**
 
@@ -613,10 +621,9 @@ python scripts/benchmark_vegaparser.py \
 ```
 
 **What to expect:**
-On an unchanged repo (the benchmark case), warm times are dramatically lower than cold.
-For example, a `kotlin-heavy` cold run of ~50 s typically drops to ~2–5 s warm, because
-all 67 000+ modules are cache hits and tree-sitter is never invoked.
-The `warm_s` column in the result table and JSON captures this timing.
+On an unchanged repo (the benchmark case), a warm run skips tree-sitter for every file.
+This README does not publish timings: the numbers for a given repo come from running the
+benchmark on that repo. The `warm_s` column in the result table and JSON captures them.
 
 > **Note:** `warm_s` is `null` / `-` when `--warm` is not passed.
 

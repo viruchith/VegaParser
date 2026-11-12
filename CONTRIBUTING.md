@@ -132,7 +132,7 @@ All shared data classes. No logic — pure `@dataclass` definitions.
 | `ExternalUrl` | `url`, `line`, `context` | HTTP/WS/FTP URL found in source |
 | `DatabaseEndpoint` | `connection_type`, `host`, `port`, `user`, `schema`, `database`, `line`, `context`, `raw_redacted` | DB/broker connection detail; password always redacted |
 
-**Serialisation note:** `dataclasses.asdict()` is used in `cache.py` to serialise `ParsedFile` to JSON. Add new fields to all dataclasses carefully — the cache deserialiser in `_dict_to_parsed_file()` must be updated in sync.
+**Serialisation note:** `dataclasses.asdict()` is used in `cache.py` to serialise `ParsedFile` to JSON. Add new fields to all dataclasses carefully — the cache deserialiser `parsed_file_from_dict()` must be updated in sync, and `CACHE_VERSION` bumped if old payloads would be misread.
 
 ---
 
@@ -143,7 +143,7 @@ All shared data classes. No logic — pure `@dataclass` definitions.
 ```python
 scanner = RepositoryScanner(root, languages={"python", "go"}, extensions={".py", ".go"})
 files = scanner.discover()   # list[Path] — repo-relative
-content = scanner.read_file(files[0])
+content = scanner.read_file(files[0])  # decodes like the cache path (see decode_source)
 ```
 
 **Key internals:**
@@ -432,37 +432,48 @@ Parsing is line-by-line for all formats; `json.loads` for `package.json`. Missin
 
 ### `cache.py`
 
-Incremental caching is persisted to `.rag_kb/parse_cache.json`.
+The parse cache is a single file, `.rag_kb/parse_cache.json`.
 
-**Cache payload format:**
+**Cache payload format** (`CACHE_VERSION = 3`):
 ```json
 {
-  "version": 1,
+  "version": 3,
+  "tool_version": "0.3.0",
   "filter": {
     "languages": ["python"],
     "extensions": [".py", ".pyw"]
   },
   "files": {
     "src/app.py": {
-      "meta": { "mtime_ns": 0, "size": 0 },
+      "sha256": "<64 hex chars of the raw file bytes>",
+      "module": "src_app_py.md",
       "parsed": { "filepath": "...", "language": "python", "classes": [] }
     }
   }
 }
 ```
 
+`parsed` is `null` for files that produced no result (for example, a file excluded by the language filter after reading). `module` is `null` in the same cases.
+
+**Reuse rules.** `cache_is_usable(payload, filter)` requires the cache `version`, `tool_version` (`repo_parser.__version__`) and `filter` to match the current run. Otherwise the whole cache is ignored. A per-file entry is reused only when its `sha256` matches the bytes just read. A malformed entry is treated as a miss, never as an error.
+
+**Bump `CACHE_VERSION`** when the layout changes. Changing parser or redaction behaviour needs a `tool_version` bump (see `pyproject.toml` and `repo_parser/__init__.py`, which must agree; `tests/unit/test_version.py` enforces it).
+
 **Public API:**
 
-| Method | Description |
+| Function | Description |
 |--------|-------------|
 | `cache_path(root)` | Returns `<root>/.rag_kb/parse_cache.json` |
+| `sha256_bytes(data)` | SHA-256 hex digest of raw bytes |
 | `build_filter_signature(languages, extensions)` | Produces deterministic cache filter metadata |
-| `load_cache(root)` | Loads JSON cache payload; returns `None` when missing/invalid |
-| `save_cache(root, payload)` | Writes cache payload to disk |
-| `file_signature(path)` | Returns stat signature (`mtime_ns`, `size`) for cache-hit checks |
+| `load_cache(root)` | Loads the JSON payload; returns `None` when missing, unreadable or not an object |
+| `cache_is_usable(payload, filter_signature)` | True when version, tool version and filter all match |
+| `save_cache(root, payload)` | Atomic write: temporary file in the same directory, then `os.replace` |
 | `parsed_file_to_dict(parsed)` / `parsed_file_from_dict(data)` | Dataclass ↔ dict conversion for cached parsed payloads |
 
-> `IndexCache` remains in `cache.py` for backward compatibility, but the active CLI path uses `load_cache` / `save_cache` and `parse_cache.json`.
+The legacy `IndexCache` class, `compute_hash` and `file_signature` were removed. Their mtime-based signature was replaced by the SHA-256 above.
+
+**Stale module cleanup** lives in `MarkdownGenerator.remove_stale_modules(keep)`. It deletes only generated files under `.rag_kb/modules/` whose first two lines are `---` and `filepath: …`, and whose name is not in `keep`.
 
 ---
 
@@ -471,20 +482,20 @@ Incremental caching is persisted to `.rag_kb/parse_cache.json`.
 Typer application with two commands: `init` and `bundle`.
 
 **`init` flow:**
-1. `setup_logging(verbose)` — configures file handler at `INFO` or `DEBUG`
+1. `setup_logging(verbose, log_target=…)` — `file` (default), `console` or `both`
 2. `RepositoryScanner(root, languages, extensions)` — initialise scanner
 3. `scanner.discover()` wrapped in `run_with_spinner` — shows spinner during discovery
-4. `load_cache(root)` — load incremental cache payload when `version` and `filter` match
+4. `load_cache(root)`; use it only when `--force` is off and `cache_is_usable(...)` holds
 5. Determine worker count via `--workers/-j` (`0` = auto `min(cpu_count, 8)`)
 6. `parsing_progress(total_steps)` context manager — shows progress bar
-7. `_parse_files(...)` — cache-aware parse pipeline; sequential for `workers=1`, `ThreadPoolExecutor` for `workers>1`
+7. `_parse_files(...)` — per file: `scanner.read_bytes` → `sha256_bytes` → reuse on match, else `_parse_source`; sequential for `workers=1`, `ThreadPoolExecutor` for `workers>1`
 8. `engine.infer_internal_dependencies(parsed_files)`
-9. `save_cache(root, payload)` with per-file `meta` + serialized `parsed`
-10. `MarkdownGenerator(root).generate(parsed_files)`
-11. Print summary and log path
+9. `MarkdownGenerator.kb_name_map`, `generate(parsed_files)`, then `remove_stale_modules(keep)`
+10. `save_cache(root, payload)` with per-file `sha256`, `module` and serialized `parsed`
+11. Print summary (modules, reused/parsed/stale counts, secrets) and the log path when there is one
 
 **`bundle` flow:**
-1. `setup_logging(verbose)`
+1. `setup_logging(verbose, log_target=…)`
 2. `bundle_knowledge_base(root, output_name)` wrapped in `run_with_spinner`
 3. `bundle_stats(bundle_path)` → print size/words/tokens/warning
 
@@ -527,16 +538,16 @@ CLI init(path, languages, workers, verbose)
   │     → .gitignore loaded via pathspec
   │     → discover() → sorted list[rel_path]
   │
-  ├── load_cache(root)
-  │     → parse_cache.json (version/filter/files)
+  ├── load_cache(root) + cache_is_usable(...)
+  │     → parse_cache.json (version/tool_version/filter/files)
   │
   ├── _parse_files(..., workers)
   │     → sequential (workers=1) or ThreadPoolExecutor (workers>1)
   │
   ├── For each rel_path:
-  │     content = scanner.read_file(rel_path)    # UTF-8 with error replace
-  │     → cache hit: parsed_file_from_dict(...)
-  │     → cache miss: engine.parse_file(...)
+  │     data = scanner.read_bytes(rel_path); digest = sha256_bytes(data)
+  │     → digest matches cache entry: parsed_file_from_dict(...)
+  │     → otherwise: engine.parse_file(decode_source(data))
   │
   ├── engine.infer_internal_dependencies(parsed_files)
   │     → populates ParsedFile.internal_dependencies
@@ -712,7 +723,7 @@ tests/
 │   ├── test_base_queries.py      ← tree-sitter node helpers
 │   ├── test_sql_queries.py       ← SQL/PL/SQL extraction
 │   ├── test_java_queries.py      ← Java fallback + tree-sitter parsers
-│   └── test_cache_extended.py    ← IndexCache lifecycle & serialisation
+│   └── test_cache_extended.py    ← parse cache reuse rules & serialisation
 └── integration/
     ├── test_cli.py
     ├── test_init_bundle.py

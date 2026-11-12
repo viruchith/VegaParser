@@ -53,6 +53,9 @@ def setup_logging(
     log_level = logging.DEBUG if verbose else logging.INFO
 
     root = logging.getLogger()
+    for handler in root.handlers:
+        # Close before dropping so repeated runs in one process do not leak file handles.
+        handler.close()
     root.handlers.clear()
     root.setLevel(logging.DEBUG)
     formatter = logging.Formatter(

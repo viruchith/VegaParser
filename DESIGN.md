@@ -82,9 +82,12 @@ CLI bundle [PATH]
 - **In-memory aggregation:** `list[ParsedFile]` collected during traversal; passed to generator at end.
 - **Output:** `.rag_kb/modules/<sanitized_path>.md` + `.rag_kb/project_index.md`
 - **Incremental cache:** A per-repo payload at `.rag_kb/parse_cache.json` stores
-  `version`, `filter`, and `files`. Each file entry contains a cheap stat signature
-  (`mtime_ns`, `size`) plus serialized `ParsedFile` data. On subsequent `init` runs,
-  unchanged files are restored from cache instead of being re-parsed.
+  `version`, `tool_version`, `filter`, and `files`. Each file entry contains the SHA-256 of
+  the file's raw bytes, the module file it produced, and the serialized `ParsedFile`. On
+  subsequent `init` runs, a file whose hash matches is restored from cache instead of being
+  re-parsed. The whole cache is ignored when the layout version, tool version or language
+  filter differ. Writes are atomic. Modules for deleted or renamed sources are removed; only
+  files carrying the generated header are candidates.
 
 ## File Traversal Strategy
 
@@ -297,7 +300,7 @@ pytest --snapshot-update
 | `test_base_queries.py` | Tree-sitter node helpers, `strip_docstring_quotes`, signature builders |
 | `test_sql_queries.py` | PL/SQL detection heuristics, fallback extraction, tree-sitter SQL parser path |
 | `test_java_queries.py` | Regex-fallback Java parser + tree-sitter `parse_java` |
-| `test_cache_extended.py` | Full `IndexCache` lifecycle and `ParsedFile` serialisation roundtrip |
+| `test_cache_extended.py` | Parse cache reuse rules, atomic save, malformed-entry handling and `ParsedFile` serialisation roundtrip |
 | `test_engine.py` | `ParserEngine` — all language branches, grammar routing, dependency inference |
 | `test_detector.py` | Maven POM, Gradle, Spring prioritisation, `_dedupe_prioritize_spring` |
 | `test_endpoints_security.py` | Property-based secret-redaction tests (hypothesis) |

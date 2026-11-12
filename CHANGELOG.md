@@ -24,11 +24,29 @@ Versions follow [Semantic Versioning](https://semver.org/).
 - `init --report-secrets` lists category, file and line for each likely secret. Values are never printed.
   Every `init` prints the redacted total.
 
+#### Cache lifecycle
+- Stale module files are removed exactly. A module is removed when its source was deleted or renamed. Only generated
+  files under `.rag_kb/modules/` are candidates, identified by their `---` / `filepath:` header. Files you add there are never touched.
+- `init --force` (alias `--no-cache`) reparses every file and rewrites the cache.
+- `--log-target file|console|both` on `init` and `bundle`. The default is `file`, which writes `repo-parser.log`
+  to the current directory. `console` writes no log file.
+- The cache is written atomically (temporary file, then `os.replace`), so an interrupted run cannot leave a partial file.
+- `init` prints reused, parsed and removed counts. Reused files are not parsed again.
+
 ### Changed
 
-- Parse cache version is now `2`. Version 1 caches are discarded because they were written before redaction.
+- Parse cache version is now `3`. Earlier caches are discarded. The cache is one file, `.rag_kb/parse_cache.json`,
+  keyed by the SHA-256 of each file's bytes instead of its mtime and size. It is also ignored when the VegaParser
+  version or `--languages` filter differs from the run that wrote it.
+- **Breaking:** `repo_parser.cache.IndexCache`, `compute_hash` and `file_signature` were removed. The
+  `.rag_kb/.cache/manifest.json` file from 0.2.0 is no longer read or written. Delete it if present.
+- Version is `0.3.0` in both `pyproject.toml` and `repo_parser/__init__.py`. A test enforces that they match.
+- `MarkdownGenerator.kb_name_map` is now public. `RepositoryScanner.read_bytes` returns the raw bytes that the cache hashes.
 
 ### Fixed
+
+#### Stack detection
+- A missing root `pom.xml` no longer logs a spurious "Could not parse" warning on every run.
 
 #### Endpoint extraction for Java, SQL and PLSQL
 - URL and database endpoint extraction now runs for Java, SQL and PLSQL files. Previously these

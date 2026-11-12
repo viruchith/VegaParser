@@ -181,10 +181,29 @@ class RepositoryScanner:
             return True
         return False
 
-    def read_file(self, rel_path: Path) -> str | None:
+    def read_bytes(self, rel_path: Path) -> bytes | None:
+        """Return the raw bytes of a file, or None if it cannot be read.
+
+        Raw bytes are what the parse cache hashes, so the cache key matches
+        exactly what is on disk.
+        """
         full = self.root / rel_path
         try:
-            return full.read_text(encoding="utf-8", errors="replace")
+            return full.read_bytes()
         except OSError as exc:
             logger.warning("Could not read %s: %s", rel_path, exc)
             return None
+
+    def read_file(self, rel_path: Path) -> str | None:
+        data = self.read_bytes(rel_path)
+        return None if data is None else decode_source(data)
+
+
+def decode_source(data: bytes) -> str:
+    """Decode file bytes as UTF-8 with replacement and universal newlines.
+
+    Matches ``Path.read_text(encoding="utf-8", errors="replace")`` so that parse
+    results are unchanged by the byte-level read.
+    """
+    text = data.decode("utf-8", errors="replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
