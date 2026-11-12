@@ -573,6 +573,7 @@ python scripts/benchmark_vegaparser.py \
 | `--refresh` | Re-clone repositories before benchmarking |
 | `--workspace <path>` | Custom clone/cache directory (default: `~/.cache/vegaparser-benchmarks`) |
 | `--json <file>` | Export full results as JSON |
+| `--local <path>` (repeatable) | Benchmark a local directory. It is copied into the workspace (`.git`, `.venv`, `node_modules`, `.rag_kb` are skipped) and never modified. With `--local` alone, only local paths run |
 | `--verbose` | Print detailed step-by-step progress logs during clone and runs |
 | `--workers <n>` | Run up to `n` targets in parallel (default: `1`) |
 | `--max-heavy-workers <n>` | Cap concurrent `heavy` targets when running in parallel (default: `2`) |
@@ -649,7 +650,39 @@ benchmark on that repo. The `warm_s` column in the result table and JSON capture
 - `cold_min_s` / `cold_max_s`: spread across cold runs (only meaningful when `--repeat` > 1)
 - `warm_s`: warm-cache timing (`--warm`) — `null` when not requested
 - `modules`: number of module markdown files generated
-- `status`: `ok`, `clone failed: …`, `cold run failed`, `warm run failed`, `interrupted` (Ctrl+C mid-run), `cancelled` (never started after Ctrl+C), or `exit <rc>`
+- `peak_mb`: peak memory in MB (see [Measurement method](#measurement-method))
+- `out_kb`: total size in KB of everything written under `.rag_kb/` after the last run
+- `status`: `ok`, `empty output (no modules or no project index)`, `clone failed: …`, `cold run failed`, `warm run failed`, `interrupted` (Ctrl+C mid-run), `cancelled` (never started after Ctrl+C), or `exit <rc>`
+
+A target is `ok` only when `init` exits `0` **and** writes at least one module **and** `project_index.md`. A run that exits `0` with empty output is recorded as a failure. The script exits `1` when any target is not `ok`.
+
+### Measured results
+
+These numbers come from this Windows PC (2026-11-12, Python 3.14 in the project venv). They are single cold runs (`--repeat 1`), with no control over background load, so treat them as indicative only.
+
+| id | source | cold_avg_s | peak_mb | out_kb | modules |
+|---|---|---|---|---|---|
+| local-fixtures | `tests/fixtures` (`--local`) | 1.90 | 49.0 | 68.7 | 20 |
+| local-VegaParser | this repo, `.venv` excluded (`--local .`) | 3.87 | 53.1 | 812.9 | 121 |
+| python-light | psf/requests | 3.46 | 51.9 | 718.3 | 37 |
+| javascript-light | preactjs/preact | 14.65 | 59.0 | 2944.1 | 207 |
+| java-heavy | google/gson | 15.25 | 58.0 | 3616.1 | 266 |
+| python-heavy | pandas-dev/pandas | 99.79 | 153.3 | 27601.0 | 1551 |
+
+Not measured yet: the full 42-target suite, warm runs at scale, macOS and Linux memory, and `init -j N` timing against `-j 1`.
+
+### Measurement method
+
+- `peak_mb` is sampled about every 0.1 s while the child process runs. Peaks shorter than that can be missed, so the value can be low.
+- On Windows the venv's `python.exe` is a launcher that starts the real interpreter as a child. The script sums the peak working set over the whole process tree, which can overstate the true simultaneous peak. The launcher itself is about 5 MB.
+- On Linux the value is the kernel's `VmHWM` peak. On other POSIX systems it is the maximum of sampled `ps` RSS values.
+
+### Scale and limits
+
+- `init` parses files in a bounded thread pool: at most `4 × workers` tasks are in flight, so memory does not grow with the number of files waiting in the queue.
+- Parsers are kept per thread. A test runs 8 threads over one shared `ParserEngine` and checks the results match a sequential run. This is evidence, not a proof of thread safety for the tree-sitter library.
+- A file that cannot be parsed makes `init` exit `2`. The knowledge base is still written, the file is listed, and it is not cached, so the next run retries it.
+- Parallel and sequential `init` produce byte-identical output on the fixtures and the eval corpus (tested with `-j 1` against `-j 8`).
 - `artifact_rag_kb`: target-specific snapshot path to generated `.rag_kb` (when present)
 - `artifact_log`: target-specific snapshot path to `repo-parser.log` (when present)
 

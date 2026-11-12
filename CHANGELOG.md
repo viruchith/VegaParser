@@ -46,7 +46,18 @@ Versions follow [Semantic Versioning](https://semver.org/).
 - The cache is written atomically (temporary file, then `os.replace`), so an interrupted run cannot leave a partial file.
 - `init` prints reused, parsed and removed counts. Reused files are not parsed again.
 
+#### Scale validation
+- `init` exits `2` when any file fails to parse. The knowledge base is still written, the failed files are listed,
+  and failed files are not cached, so the next run retries them.
+- Parallel parsing (`init -j N`) keeps at most `4 × N` tasks in flight. Output is byte-identical to `-j 1`
+  (tested on the fixtures and the eval corpus).
+- `scripts/benchmark_vegaparser.py --local PATH` benchmarks a local directory. It is copied into the workspace, never modified.
+- Benchmark rows now record `peak_mb` (peak memory, sampled) and `out_kb` (output size). Measured values and method: `README.md → Benchmarking`.
+
 ### Changed
+- **Benchmark status is stricter.** A run that exits `0` but writes no modules or no `project_index.md` is `empty output`
+  and not `ok`. The benchmark exits `1` when any target is not `ok`.
+- **`init` exit code `2` on parse failures** (new). Scripts that relied on `0` for a partial parse must check for `2`.
 
 - **Bundle order is now relevance order** (was alphabetical by file name). Without a query the order is deterministic
   and favours entry points and widely imported modules. Index first, as before.

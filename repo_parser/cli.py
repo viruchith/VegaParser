@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -27,7 +27,7 @@ from repo_parser.cache import (
 from repo_parser.generator.bundle import BUNDLE_FILENAME, BundleError, bundle_knowledge_base, bundle_stats
 from repo_parser.generator.markdown import MarkdownGenerator
 from repo_parser.models import ParsedFile
-from repo_parser.parser.engine import ParserEngine
+from repo_parser.parser.engine import PARSERS, ParserEngine
 from repo_parser.parser.registry import detect_language, extensions_for_languages, normalize_language_filter
 from repo_parser.traversal.scanner import RepositoryScanner, decode_source
 from repo_parser.ui.console import console
@@ -69,6 +69,12 @@ class _ParseStats:
     records: dict[str, _Record] = field(default_factory=dict)
     # Java source text, needed to resolve package names during dependency inference.
     java_sources: dict[str, str] = field(default_factory=dict)
+    # Files that could not be read, parsed, or processed. Any entry makes `init` exit 2.
+    failures: list[str] = field(default_factory=list)
+
+
+MAX_INFLIGHT_PER_WORKER = 4
+"""Futures kept in flight per worker. Bounds memory when a repo has many files."""
 
 
 def _restore_cached(entry: object, digest: str) -> tuple[bool, ParsedFile | None]:
@@ -89,32 +95,45 @@ def _parse_source(
     rel_str: str,
     content: str,
     lang_filter: set[str] | None,
-) -> ParsedFile | None:
+) -> tuple[ParsedFile | None, bool]:
+    """Return ``(parsed, failed)``.
+
+    ``failed`` is True only when the file has a language with a parser and the parser
+    still produced nothing. Unsupported files and files skipped by a filter are not
+    failures, because the engine is never asked to parse them.
+    """
     if lang_filter:
         detected = detect_language(rel_str)
         if detected not in lang_filter:
             if not (detected == "yaml" and "kubernetes" in lang_filter):
                 logger.debug("Skipped by language filter: %s (%s)", rel_str, detected)
-                return None
+                return None, False
         if detected == "yaml" and "kubernetes" in lang_filter and "yaml" not in lang_filter:
             result = engine.parse_file(rel_str, content)
             if result is not None and result.language != "kubernetes":
                 logger.debug("Skipped non-Kubernetes YAML: %s", rel_str)
-                return None
-            return result
+                return None, False
+            return result, result is None
 
     result = engine.parse_file(rel_str, content)
-    if result is None:
-        logger.warning("Failed to parse or unsupported file: %s", rel_str)
-    return result
+    if result is not None:
+        return result, False
+    detected = detect_language(rel_str)
+    if detected is not None and detected in PARSERS:
+        logger.error("Failed to parse %s (%s)", rel_str, detected)
+        return None, True
+    logger.debug("Unsupported file, not parsed: %s", rel_str)
+    return None, False
 
 
 @dataclass(frozen=True)
 class _Outcome:
     rel_str: str
-    digest: str
+    # None when the file could not be read; such files are not cached.
+    digest: str | None
     parsed: ParsedFile | None
     reused: bool
+    failed: bool
     java_source: str | None
 
 
@@ -130,23 +149,27 @@ def _parse_files(
     """Parse files, reusing cache entries whose SHA-256 matches the bytes on disk."""
     stats = _ParseStats()
 
-    def _process_one(rel_path: Path) -> _Outcome | None:
+    def _process_one(rel_path: Path) -> _Outcome:
         rel_str = rel_path.as_posix()
         data = scanner.read_bytes(rel_path)
         if data is None:
             logger.warning("Skipped unreadable file: %s", rel_str)
-            return None
+            return _Outcome(rel_str, None, None, False, True, None)
         digest = sha256_bytes(data)
         java_source = decode_source(data) if rel_str.endswith(".java") else None
         hit, cached = _restore_cached(previous_files.get(rel_str), digest)
         if hit:
             logger.debug("Cache hit: %s", rel_str)
-            return _Outcome(rel_str, digest, cached, True, java_source)
-        parsed = _parse_source(engine, rel_str, decode_source(data), lang_filter)
-        return _Outcome(rel_str, digest, parsed, False, java_source)
+            return _Outcome(rel_str, digest, cached, True, False, java_source)
+        parsed, failed = _parse_source(engine, rel_str, decode_source(data), lang_filter)
+        return _Outcome(rel_str, digest, parsed, False, failed, java_source)
 
-    def _record(outcome: _Outcome | None) -> None:
-        if outcome is None:
+    def _record(outcome: _Outcome) -> None:
+        if outcome.failed:
+            # Failures are not cached, so the next run tries them again and reports them again.
+            stats.failures.append(outcome.rel_str)
+            return
+        if outcome.digest is None:
             return
         stats.records[outcome.rel_str] = _Record(outcome.digest, outcome.parsed)
         if outcome.java_source is not None:
@@ -163,19 +186,35 @@ def _parse_files(
             _record(_process_one(rel_path))
             progress_update(advance=1)
     else:
-        # Parallel path — Rich Progress.update() is thread-safe.
+        # Parallel path. Rich Progress.update() is thread-safe. Submission is bounded:
+        # at most MAX_INFLIGHT_PER_WORKER * workers futures exist at once, so the queue
+        # does not grow with repository size.
+        limit = workers * MAX_INFLIGHT_PER_WORKER
+        pending_paths: dict[Future, Path] = {}
+        remaining = iter(files)
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            future_to_path = {executor.submit(_process_one, fp): fp for fp in files}
-            for future in as_completed(future_to_path):
-                rel_path = future_to_path[future]
-                progress_update(f"Processing {truncate_filepath(rel_path.as_posix())}…")
-                try:
-                    outcome = future.result()
-                except Exception as exc:
-                    logger.error("Worker failed on %s: %s", rel_path, exc)
-                    outcome = None
-                _record(outcome)
-                progress_update(advance=1)
+
+            def _submit_next() -> None:
+                rel_path = next(remaining, None)
+                if rel_path is not None:
+                    pending_paths[executor.submit(_process_one, rel_path)] = rel_path
+
+            for _ in range(limit):
+                _submit_next()
+            while pending_paths:
+                done, _ = wait(pending_paths, return_when=FIRST_COMPLETED)
+                for future in done:
+                    rel_path = pending_paths.pop(future)
+                    progress_update(f"Processing {truncate_filepath(rel_path.as_posix())}…")
+                    try:
+                        outcome = future.result()
+                    except Exception as exc:
+                        logger.error("Worker failed on %s: %s", rel_path, exc)
+                        stats.failures.append(rel_path.as_posix())
+                    else:
+                        _record(outcome)
+                    _submit_next()
+                    progress_update(advance=1)
 
     parsed_files = sorted(
         (r.parsed for r in stats.records.values() if r.parsed is not None),
@@ -347,6 +386,16 @@ def init(
         _print_secret_report(secret_rows)
     if log_path is not None:
         console.print(f"Log file: [dim]{log_path}[/dim]")
+    if stats.failures:
+        # The knowledge base and cache were written above. Failures make the run non-zero
+        # so CI and scripts notice them.
+        shown = sorted(stats.failures)[:50]
+        console.print(f"[red]Failed on {len(stats.failures)} file(s).[/red] Knowledge base was still written.")
+        for rel_str in shown:
+            console.print(f"  - {rel_str}")
+        if len(stats.failures) > len(shown):
+            console.print(f"  ... and {len(stats.failures) - len(shown)} more (see the log)")
+        raise typer.Exit(code=2)
 
 
 @app.command("bundle")
