@@ -17,7 +17,7 @@ Thank you for your interest in contributing. This document is the **technical re
    - [parser/queries — language extractors](#parserqueries--language-extractors)
    - [parser/extractors/endpoints.py](#parserextractorsendpointspy)
    - [generator/markdown.py](#generatormarkdownpy)
-   - [generator/bundle.py](#generatorbundlepy)
+   - [generator/bundle.py](#generatorbundlepy) (includes `generator/context.py`)
    - [generator/templates](#generatortemplates)
    - [stack/detector.py](#stackdetectorpy)
    - [cache.py](#cachepy)
@@ -205,7 +205,7 @@ engine.infer_internal_dependencies(parsed_files)
 
 **Thread-safety note:** tree-sitter parsers are not shared across threads. Each worker thread keeps its own parser cache.
 
-**`infer_internal_dependencies`** builds a stem map of all known module paths, then for each `ParsedFile`, tries to resolve each import token against that map. Relative imports (starting with `.`) are resolved relative to the file's directory. Only exact matches are linked — this is intentionally conservative.
+**`infer_internal_dependencies(parsed_files, sources=None)`** delegates to `repo_parser/parser/dependencies.py`, the one resolver used by `init` and by `scripts/evaluate_orientation.py`. It resolves per language: Python dotted imports and relative imports, JS/TS relative imports with extension and `index` fallbacks, Java fully qualified names (needs `sources` to read `package` lines), Kotlin, and Python bare stems as a last resort. Only resolved repository files are linked, so it stays conservative. Its accuracy is measured in `docs/evaluation.md`.
 
 **`PARSERS` dict** — populated at module level; also extended with `PROFILES` entries from `common_queries.py`:
 
@@ -366,9 +366,20 @@ Examples:
 
 ### `generator/bundle.py`
 
-`bundle_knowledge_base(root, output_name)` concatenates `.rag_kb/` into a single file.
+`bundle_knowledge_base(root, output_name, *, max_tokens=None, query=None, paths=None)` concatenates `.rag_kb/` into a single file and returns a `BundleResult` (path, characters, included, omitted, candidates).
 
-**Ordering:** HTML comment header → `project_index.md` → `modules/*.md` (alphabetical by filename).
+Ranking and budget selection live in `generator/context.py`, which is pure and has no I/O:
+- `context_file_from_cache(path, module, parsed)` builds the facts used for ranking from the parse cache.
+- `rank_files(files, query)` scores files. Ties break on depth, then path. A query adds to the score for name hits (path, symbols, weight 3) and detail hits (imports, exports, docstring, weight 1), and gives a one-hop boost to the direct dependencies of matched files.
+- `filter_by_paths(files, patterns)` applies gitignore-style `--path` globs.
+- `select_blocks(sizes, budget_chars, fixed_chars, reserve)` takes blocks in rank order and skips any that do not fit. The omitted-list reserve is iterated to a fixed point. It raises `BudgetError` when the fixed text plus the reserve do not fit, and never returns a selection that exceeds the budget.
+- `estimate_tokens(chars) = ceil(chars / 3)`. The budget is held in characters, and `chars <= 3 * max_tokens` is exactly equivalent to `estimate <= max_tokens`.
+
+**Ordering:** HTML comment header → `project_index.md` → `modules/*.md` in rank order.
+
+**Header:** the budget, ranking mode, query and path filter are written as HTML comments, so the bundle states its own bound.
+
+**Omitted list:** `## Omitted by budget` lists at most 100 paths, then `- ... and N more`.
 
 **Separator** between each module file:
 ```
@@ -377,9 +388,9 @@ Examples:
 ---
 ```
 
-`bundle_stats(bundle_path)` returns `{characters, words, bytes, size_human, tokens_estimate}` where `tokens_estimate = char_count // 4`.
+`bundle_stats(bundle_path)` returns `{characters, words, bytes, size_human, tokens_estimate}` where `tokens_estimate = ceil(characters / 3)`. This is an approximation, and the CLI labels it that way.
 
-Raises `BundleError` (not `SystemExit`) when `.rag_kb/` is missing or contains no Markdown files.
+Raises `BundleError` (not `SystemExit`) when `.rag_kb/` or its current parse cache is missing, when `--output` is not a plain `*.md` name, when `--max-tokens` is below 1, or when the budget is too small for the header, index, or omitted list.
 
 ---
 
@@ -496,8 +507,8 @@ Typer application with two commands: `init` and `bundle`.
 
 **`bundle` flow:**
 1. `setup_logging(verbose, log_target=…)`
-2. `bundle_knowledge_base(root, output_name)` wrapped in `run_with_spinner`
-3. `bundle_stats(bundle_path)` → print size/words/tokens/warning
+2. `bundle_knowledge_base(root, output, max_tokens, query, paths)` wrapped in `run_with_spinner`. It validates the output name and budget, reads the parse cache, filters by `--path`, ranks with `rank_files`, and selects within the budget with `select_blocks`.
+3. `bundle_stats(result.path)` → print budget, included/omitted counts, size/words/tokens/warning
 
 ---
 
@@ -716,6 +727,8 @@ tests/
 │   ├── test_endpoints_security.py
 │   ├── test_markdown.py
 │   ├── test_bundle.py
+│   ├── test_context.py           ← ranking, query/path, budget selection (property tests)
+│   ├── test_version.py           ← package version matches pyproject.toml
 │   ├── test_detector.py
 │   ├── test_logging_config.py
 │   ├── test_query_api_spike.py

@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -84,11 +85,27 @@ def save_cache(root: Path, payload: dict) -> Path:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(body)
-        os.replace(tmp_name, path)
+        _replace_with_retry(tmp_name, path)
     except BaseException:
         Path(tmp_name).unlink(missing_ok=True)
         raise
     return path
+
+
+_REPLACE_ATTEMPTS = 5
+
+
+def _replace_with_retry(src: str, dst: Path) -> None:
+    """``os.replace`` with a short retry. On Windows, a scanner or indexer that briefly holds
+    the old cache file makes the rename fail with PermissionError; the retry rides that out."""
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(0.05 * (attempt + 1))
 
 
 # ── ParsedFile ↔ dict converters ─────────────────────────────────────────────

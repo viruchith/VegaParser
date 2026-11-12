@@ -44,7 +44,8 @@ vegaparser/
     ├── generator/
     │   ├── __init__.py
     │   ├── markdown.py             # Jinja2 render + file naming
-    │   ├── bundle.py               # Concatenate .rag_kb → full_repo_context.md
+    │   ├── bundle.py               # Concatenate .rag_kb → full_repo_context.md (budget, output checks)
+    │   ├── context.py              # Pure ranking (entry points, in-degree, --query) and budget selection
     │   └── templates/
     │       ├── module.md.j2
     │       └── project_index.md.j2
@@ -235,11 +236,15 @@ repo-parser bundle [PATH] [OPTIONS]
 
 ### `bundle` command
 
-- Requires an existing `.rag_kb/` directory (run `init` first)
-- Order: `project_index.md` → `modules/*.md` (alphabetical)
+- Requires an existing `.rag_kb/` and a current parse cache (run `init` first)
+- Order: `project_index.md` → `modules/*.md` in relevance order (ties by depth, then path). Output is deterministic.
+- `--max-tokens N` caps the bundle at N approximate tokens (characters / 3). Whole modules only. Omitted modules are listed at the end. The project index is always included, so a budget below the header and index is an error.
+- `--query` and `--path` change which modules rank first or are considered. Both are reflected in the bundle header.
+- `--output` must be a plain `*.md` name inside `.rag_kb/`.
+- The bound is printed on every run (`Budget: unlimited` or `Budget: N tokens`).
 - Delimiter before each module file; frontmatter preserved
-- Prints size (KB/MB), character/word counts, ~token estimate, and context-window warning
-- Raises a clear error if `.rag_kb/` is missing or empty
+- Prints the budget, included and omitted module counts, size, character/word counts, the approximate token estimate, and a context-window warning
+- Raises a clear error if `.rag_kb/` or its cache is missing, or if the output name or budget is invalid
 
 ### Logging
 

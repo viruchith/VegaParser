@@ -88,6 +88,7 @@ def parse_repo(root: Path) -> tuple[dict[str, ParsedFile], dict[str, int]]:
     engine = ParserEngine()
     parsed: list[ParsedFile] = []
     source_chars: dict[str, int] = {}
+    java_sources: dict[str, str] = {}
     for rel in scanner.discover():
         content = scanner.read_file(rel)
         if content is None:
@@ -96,7 +97,9 @@ def parse_repo(root: Path) -> tuple[dict[str, ParsedFile], dict[str, int]]:
         if result is not None:
             parsed.append(result)
             source_chars[result.filepath] = len(content)
-    engine.infer_internal_dependencies(parsed)
+            if result.filepath.endswith(".java"):
+                java_sources[result.filepath] = content
+    engine.infer_internal_dependencies(parsed, java_sources)
     return {pf.filepath: pf for pf in parsed}, source_chars
 
 

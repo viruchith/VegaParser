@@ -53,7 +53,7 @@ def test_init_module_names_snapshot(fixtures_copy, snapshot):
 
 def test_bundle_after_init(fixtures_copy):
     run_init(fixtures_copy)
-    bundle_path = bundle_knowledge_base(fixtures_copy)
+    bundle_path = bundle_knowledge_base(fixtures_copy).path
     assert bundle_path.is_file()
     assert bundle_path.name == "full_repo_context.md"
 

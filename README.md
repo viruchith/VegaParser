@@ -85,7 +85,7 @@
 │         │                                                           │
 │         ▼  (optional)                                               │
 │  bundle_knowledge_base()                                            │
-│    • project_index.md first, then modules/ alphabetically           │
+│    • project_index.md first, then modules by relevance (+ budget)   │
 │    • → .rag_kb/full_repo_context.md                                 │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -220,43 +220,59 @@ The `Log file` line is omitted when `--log-target console` is used.
 repo-parser bundle [PATH] [OPTIONS]
 ```
 
-Concatenates all files in `.rag_kb/` into a single `full_repo_context.md` ordered for LLM attention: `project_index.md` first, then module files alphabetically.
+Writes `.rag_kb/full_repo_context.md`: the project index first, then module files in **relevance order** (most relevant first). Ties break on path depth, then path, so the output is byte-identical for the same cache and arguments.
+
+**Budget.** The bound is always printed on every run (`Budget: unlimited` or `Budget: N tokens`), and the header of the bundle file states it too. `--max-tokens N` caps the bundle at N approximate tokens. The estimate is `ceil(characters / 3)`. This is a rough heuristic, not a tokenizer count. Modules are included whole. A module that does not fit is skipped, and smaller later modules may still fit. Omitted modules are listed at the end under `## Omitted by budget`. The project index is always included, so a budget smaller than the header and index is an error (exit 1) rather than an overrun.
+
+**Relevance.** Without `--query`, ranking uses entry points (`main.py`, `index.ts`, `Main.java`, ...), `main` functions, in-degree (how many internal files import a module, capped at 10), database or URL endpoints, and a penalty for test files. With `--query`, modules whose path, symbols, imports, exports or docstring mention a query term move up. Their direct internal dependencies get a one-hop boost. Matching is case-insensitive and camelCase in the query is split.
 
 | Argument / Option | Short | Type | Default | Description |
 |-------------------|-------|------|---------|-------------|
-| `PATH` | — | directory | `.` | Repository root (must contain `.rag_kb/`) |
-| `--output` | `-o` | string | `full_repo_context.md` | Output filename inside `.rag_kb/` |
+| `PATH` | — | directory | `.` | Repository root (must contain `.rag_kb/` and a current parse cache) |
+| `--output` | `-o` | string | `full_repo_context.md` | Plain `*.md` file name inside `.rag_kb/`. Paths and `project_index.md` are rejected (exit 1). |
+| `--max-tokens` | — | integer ≥ 1 | unlimited | Approximate token budget (characters / 3). Whole modules only. |
+| `--query` | `-q` | string | none | Rank modules that mention these terms first |
+| `--path` | — | gitignore-style glob, repeatable | all | Only consider modules whose repo-relative path matches. Multiple `--path` values are combined with OR. |
 | `--verbose` | `-v` | flag | off | Write DEBUG-level details to `repo-parser.log` |
 | `--log-target` | — | `file\\|console\\|both` | `file` | Choose where logs are written |
 
 **Examples:**
 
 ```bash
-# Default bundle
+# Whole knowledge base, no budget (prints "Budget: unlimited")
 repo-parser bundle
 
-# Custom output name
-repo-parser bundle -o context_for_gpt.md
+# At most ~8,000 approximate tokens, most relevant modules first
+repo-parser bundle --max-tokens 8000
 
-# Bundle a different project
-repo-parser bundle ~/projects/api-server
+# Focus on billing code and what it depends on
+repo-parser bundle --query invoice --max-tokens 8000
+
+# Only the Python packages under app/
+repo-parser bundle --path "app/**" --max-tokens 8000
+
+# Custom output name (must be a plain .md name)
+repo-parser bundle -o context_for_gpt.md
 ```
 
-**Output on success:**
+**Output on success** (fixtures, `init` already run):
 
 ```
 Bundle created successfully.
   Output:      /your/project/.rag_kb/full_repo_context.md
-  Size:        284.3 KB (291,145 bytes)
-  Characters:  291,059
-  Words:       42,318
-  ~Tokens:     72,764 (rough estimate, ~4 chars/token)
-  Log file:    /your/project/repo-parser.log
+  Budget:      2500 tokens (approximate: characters / 3)
+  Modules:     2 of 20 included, 18 omitted by budget
+  Size:        6.8 KB (6,996 bytes)
+  Characters:  6,794
+  Words:       1,150
+  ~Tokens:     2,265 (approximate: characters / 3)
 
 Warning: This file is intended for LLMs with large context windows.
 ```
 
-> **Tip:** Run `init` before `bundle`. `bundle` raises an error if `.rag_kb/` does not exist.
+With no budget the same repo gives `Budget: unlimited` and `Modules: 20 of 20 included`, which is 24,934 characters (about 8,312 approximate tokens). A `--max-tokens 1000` run fails with `too small`, because the header and index alone need about 1,788 approximate tokens for that repo.
+
+> **Tip:** Run `init` before `bundle`. `bundle` raises an error if `.rag_kb/` or its parse cache is missing or was written by another VegaParser version.
 
 ---
 

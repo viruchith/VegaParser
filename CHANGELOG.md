@@ -10,6 +10,19 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+#### Context budgeting for `bundle`
+- `bundle --max-tokens N` caps the bundle at about N tokens. The estimate is `ceil(characters / 3)`, labelled
+  approximate everywhere. Whole modules only. The project index is always included, so a budget smaller than
+  the header and index is an error (exit 1), not an overrun. Omitted modules are listed at the end.
+- The bound is printed on every run (`Budget: unlimited` or `Budget: N tokens`) and in the bundle header.
+- `bundle --query TEXT` (`-q`) ranks modules whose path, symbols, imports, exports or docstring match first,
+  and gives their direct internal dependencies a one-hop boost.
+- `bundle --path GLOB` (repeatable) keeps only modules whose repo path matches a gitignore-style pattern.
+- Without a query, ranking uses entry points, `main` functions, in-degree, endpoints and a test-file penalty.
+  Ties break on depth, then path, so output is deterministic.
+- `bundle --output` must be a plain `*.md` file name inside `.rag_kb/`. Paths and `project_index.md` are rejected.
+- Each module block still carries its source path and the line range of every class and function.
+
 #### Offline orientation evaluation
 - `scripts/evaluate_orientation.py` measures extraction precision/recall and top-k retrieval against
   hand-written Python, TypeScript and Java corpora under `tests/eval_corpus/`. No LLM, no network.
@@ -35,6 +48,13 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Bundle order is now relevance order** (was alphabetical by file name). Without a query the order is deterministic
+  and favours entry points and widely imported modules. Index first, as before.
+- **Bundle token estimate is `characters / 3`** (was `characters // 4`). The estimate is labelled approximate. It is
+  still not a tokenizer count.
+- `ParserEngine.infer_internal_dependencies` delegates to the multi-language resolver in
+  `repo_parser/parser/dependencies.py`, which `init` and the evaluation script now both use.
+- `bundle` needs a parse cache written by the current version. Run `init` again after upgrading.
 - Parse cache version is now `3`. Earlier caches are discarded. The cache is one file, `.rag_kb/parse_cache.json`,
   keyed by the SHA-256 of each file's bytes instead of its mtime and size. It is also ignored when the VegaParser
   version or `--languages` filter differs from the run that wrote it.
@@ -44,6 +64,11 @@ Versions follow [Semantic Versioning](https://semver.org/).
 - `MarkdownGenerator.kb_name_map` is now public. `RepositoryScanner.read_bytes` returns the raw bytes that the cache hashes.
 
 ### Fixed
+
+#### Dependency resolution
+- `init` used a stem-only resolver, so dotted Python imports and relative JS/TS imports never linked. It now uses the
+  multi-language resolver. On the orientation corpus, dependency recall rose from 0% to 85.7% with 100% precision
+  (24 true positives, 4 missed). Measured by `scripts/evaluate_orientation.py`, see `docs/evaluation.md`.
 
 #### Stack detection
 - A missing root `pom.xml` no longer logs a spurious "Could not parse" warning on every run.

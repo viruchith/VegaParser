@@ -192,30 +192,18 @@ class ParserEngine:
             logger.warning("No parse result for %s (%s)", filepath, lang_name)
         return result
 
-    def infer_internal_dependencies(self, parsed_files: list[ParsedFile]) -> None:
-        """Link import statements to internal module paths where possible."""
-        module_paths = {pf.filepath for pf in parsed_files}
-        stem_map: dict[str, str] = {}
-        for path in module_paths:
-            from pathlib import Path
+    def infer_internal_dependencies(
+        self,
+        parsed_files: list[ParsedFile],
+        sources: dict[str, str] | None = None,
+    ) -> None:
+        """Link import statements to internal module paths.
 
-            p = Path(path)
-            stem_map[p.stem] = path
-            if p.suffix:
-                stem_map[p.stem + p.suffix.replace(".", "_")] = path
-
-        for pf in parsed_files:
-            deps: set[str] = set()
-            for imp in pf.imports:
-                for token in imp.replace(",", " ").split():
-                    token = token.strip().strip("'\"")
-                    if token.startswith("."):
-                        resolved = self._resolve_relative(pf.filepath, token)
-                        if resolved and resolved in module_paths:
-                            deps.add(resolved)
-                    elif token in stem_map:
-                        deps.add(stem_map[token])
-            pf.internal_dependencies = sorted(deps)
+        Delegates to the multi-language resolver in ``repo_parser.parser.dependencies``,
+        the single resolver used by ``init`` and by the evaluation script.
+        ``sources`` maps repo-relative path to text; it is needed for Java package names.
+        """
+        infer_file_dependencies(parsed_files, sources)
 
     @staticmethod
     def _resolve_relative(from_path: str, import_path: str) -> str | None:

@@ -84,6 +84,25 @@ def _generated_bytes(root: Path) -> dict[str, bytes]:
     return out
 
 
+def test_cache_holds_resolved_dependencies_on_fresh_and_cached_runs(tmp_path, monkeypatch):
+    """Dependency edges are computed after parsing, so they must be saved after inference."""
+    monkeypatch.chdir(tmp_path)
+    repo = tmp_path / "small"
+    repo.mkdir()
+    (repo / "helper.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
+    (repo / "main.py").write_text("import helper\n\n\ndef main():\n    return helper.helper()\n", encoding="utf-8")
+
+    def cached_deps() -> list[str]:
+        payload = json.loads(cache_path(repo).read_text(encoding="utf-8"))
+        return payload["files"]["main.py"]["parsed"]["internal_dependencies"]
+
+    _init(repo)
+    assert cached_deps() == ["helper.py"]
+
+    _init(repo)  # main.py now comes from the cache
+    assert cached_deps() == ["helper.py"]
+
+
 def test_warm_cache_output_matches_full_reparse(repo):
     _init(repo)
     _init(repo)  # warm: every file comes from the cache

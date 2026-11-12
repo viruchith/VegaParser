@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import typer
 from rich.table import Table
@@ -56,11 +56,19 @@ def _cli_root() -> None:
 
 
 @dataclass
+class _Record:
+    digest: str
+    parsed: ParsedFile | None
+
+
+@dataclass
 class _ParseStats:
     reused: int = 0
     parsed: int = 0
-    # rel_path -> cache entry for every file that was read successfully.
-    entries: dict[str, dict] = field(default_factory=dict)
+    # rel_path -> digest and parse result. Serialised only after dependency inference.
+    records: dict[str, _Record] = field(default_factory=dict)
+    # Java source text, needed to resolve package names during dependency inference.
+    java_sources: dict[str, str] = field(default_factory=dict)
 
 
 def _restore_cached(entry: object, digest: str) -> tuple[bool, ParsedFile | None]:
@@ -101,6 +109,15 @@ def _parse_source(
     return result
 
 
+@dataclass(frozen=True)
+class _Outcome:
+    rel_str: str
+    digest: str
+    parsed: ParsedFile | None
+    reused: bool
+    java_source: str | None
+
+
 def _parse_files(
     scanner: RepositoryScanner,
     files: list[Path],
@@ -112,37 +129,32 @@ def _parse_files(
 ) -> tuple[list[ParsedFile], _ParseStats]:
     """Parse files, reusing cache entries whose SHA-256 matches the bytes on disk."""
     stats = _ParseStats()
-    parsed_files: list[ParsedFile] = []
 
-    def _process_one(rel_path: Path) -> tuple[str, str, ParsedFile | None, bool] | None:
+    def _process_one(rel_path: Path) -> _Outcome | None:
         rel_str = rel_path.as_posix()
         data = scanner.read_bytes(rel_path)
         if data is None:
             logger.warning("Skipped unreadable file: %s", rel_str)
             return None
         digest = sha256_bytes(data)
+        java_source = decode_source(data) if rel_str.endswith(".java") else None
         hit, cached = _restore_cached(previous_files.get(rel_str), digest)
         if hit:
             logger.debug("Cache hit: %s", rel_str)
-            return rel_str, digest, cached, True
+            return _Outcome(rel_str, digest, cached, True, java_source)
         parsed = _parse_source(engine, rel_str, decode_source(data), lang_filter)
-        return rel_str, digest, parsed, False
+        return _Outcome(rel_str, digest, parsed, False, java_source)
 
-    def _record(outcome: tuple[str, str, ParsedFile | None, bool] | None) -> None:
+    def _record(outcome: _Outcome | None) -> None:
         if outcome is None:
             return
-        rel_str, digest, parsed, reused = outcome
-        stats.entries[rel_str] = {
-            "sha256": digest,
-            "module": None,
-            "parsed": parsed_file_to_dict(parsed) if parsed is not None else None,
-        }
-        if reused:
+        stats.records[outcome.rel_str] = _Record(outcome.digest, outcome.parsed)
+        if outcome.java_source is not None:
+            stats.java_sources[outcome.rel_str] = outcome.java_source
+        if outcome.reused:
             stats.reused += 1
         else:
             stats.parsed += 1
-        if parsed is not None:
-            parsed_files.append(parsed)
 
     if workers <= 1:
         # Sequential path — preserves original progress display behaviour.
@@ -165,7 +177,10 @@ def _parse_files(
                 _record(outcome)
                 progress_update(advance=1)
 
-    parsed_files.sort(key=lambda p: p.filepath)
+    parsed_files = sorted(
+        (r.parsed for r in stats.records.values() if r.parsed is not None),
+        key=lambda p: p.filepath,
+    )
     return parsed_files, stats
 
 
@@ -277,22 +292,29 @@ def init(
             scanner, files, engine, lang_filter, previous_files, progress_update, workers=effective_workers
         )
 
-        progress_update("Generating Markdown knowledge base…")
-        engine.infer_internal_dependencies(parsed_files)
+        progress_update("Resolving dependencies and generating Markdown knowledge base…")
+        engine.infer_internal_dependencies(parsed_files, stats.java_sources)
         generator = MarkdownGenerator(root)
         names = generator.kb_name_map(parsed_files)
         index_path = generator.generate(parsed_files)
         removed = generator.remove_stale_modules(keep=set(names.values()))
 
-        for rel_str, entry in stats.entries.items():
-            entry["module"] = names.get(rel_str)
+        # Serialise after dependency inference so the cache holds the resolved edges.
+        entries = {
+            rel_str: {
+                "sha256": record.digest,
+                "module": names.get(rel_str),
+                "parsed": parsed_file_to_dict(record.parsed) if record.parsed is not None else None,
+            }
+            for rel_str, record in stats.records.items()
+        }
         save_cache(
             root,
             {
                 "version": CACHE_VERSION,
                 "tool_version": __version__,
                 "filter": filter_signature,
-                "files": stats.entries,
+                "files": entries,
             },
         )
         progress_update(advance=1)
@@ -341,7 +363,24 @@ def bundle(
         BUNDLE_FILENAME,
         "--output",
         "-o",
-        help=f"Output filename inside `.rag_kb/` (default: {BUNDLE_FILENAME}).",
+        help=f"Output file name inside `.rag_kb/`, must end in .md (default: {BUNDLE_FILENAME}).",
+    ),
+    max_tokens: Optional[int] = typer.Option(
+        None,
+        "--max-tokens",
+        help="Approximate token budget (characters / 3). Omit for unlimited. Whole files only.",
+        min=1,
+    ),
+    query: Optional[str] = typer.Option(
+        None,
+        "--query",
+        "-q",
+        help="Rank modules that mention these terms (path, symbols, imports, docs) first.",
+    ),
+    include_path: Optional[List[str]] = typer.Option(
+        None,
+        "--path",
+        help="Only include modules whose repo path matches this gitignore-style pattern. Repeatable.",
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug file logging."),
     log_target: LogTarget = typer.Option(
@@ -354,26 +393,35 @@ def bundle(
     """Concatenate `.rag_kb/` Markdown files into a single LLM context bundle."""
     log_path = setup_logging(verbose, log_target=log_target.value)
     root = path.resolve()
-    logger.info("Starting bundle at %s", root)
+    logger.info("Starting bundle at %s (max_tokens=%s)", root, max_tokens)
 
     try:
-        bundle_path = run_with_spinner(
+        result = run_with_spinner(
             "Bundling knowledge base files…",
-            lambda: bundle_knowledge_base(root, output_name=output),
+            lambda: bundle_knowledge_base(
+                root,
+                output_name=output,
+                max_tokens=max_tokens,
+                query=query,
+                paths=tuple(include_path or ()),
+            ),
         )
     except BundleError as exc:
         logger.error("Bundle failed: %s", exc)
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(code=1) from exc
 
-    stats = bundle_stats(bundle_path)
-    logger.info("Bundle written to %s (%s)", bundle_path, stats["size_human"])
+    stats = bundle_stats(result.path)
+    logger.info("Bundle written to %s (%s)", result.path, stats["size_human"])
+    omitted_note = f", {len(result.omitted)} omitted by budget" if result.omitted else ""
     console.print("[green]Bundle created successfully.[/green]")
-    console.print(f"  Output:      {bundle_path}")
+    console.print(f"  Output:      {result.path}")
+    console.print(f"  Budget:      {result.budget_label}")
+    console.print(f"  Modules:     {len(result.included)} of {result.candidates} included{omitted_note}")
     console.print(f"  Size:        {stats['size_human']} ({stats['bytes']:,} bytes)")
     console.print(f"  Characters:  {stats['characters']:,}")
     console.print(f"  Words:       {stats['words']:,}")
-    console.print(f"  ~Tokens:     {stats['tokens_estimate']:,} (rough estimate, ~4 chars/token)")
+    console.print(f"  ~Tokens:     {stats['tokens_estimate']:,} (approximate: characters / 3)")
     if log_path is not None:
         console.print(f"  Log file:    [dim]{log_path}[/dim]")
     console.print(
