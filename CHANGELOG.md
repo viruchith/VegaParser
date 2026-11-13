@@ -8,6 +8,9 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- README diagrams are now Mermaid. The indexing pipeline, language tiers, quick start, `init` exit codes, bundle budgeting, cache decisions, and secret-redaction surfaces each have a flowchart or sequence diagram. The ASCII pipeline diagram is removed. Behaviour is unchanged.
+
 ---
 
 ## [0.3.0] — 2026-11-12

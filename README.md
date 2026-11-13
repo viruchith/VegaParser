@@ -52,42 +52,32 @@
 
 ## How It Works
 
+`init` scans the tree, reuses cached parses, then writes the knowledge base. `bundle` is a separate command that reads that cache.
+
+```mermaid
+flowchart TD
+  root["Repository root"] --> scan["RepositoryScanner"]
+  scan --> files["Selected source files"]
+  files --> cache{"SHA-256 matches parse_cache.json?"}
+  cache -->|yes| reuse["Restore ParsedFile. Skip Tree-sitter"]
+  cache -->|no| parse["ParserEngine.parse_file"]
+  parse --> outcome{"Parse result"}
+  outcome -->|parsed| enrich["Extract URLs and DB endpoints. Redact secrets"]
+  outcome -->|supported language failed| fail["Record the path. Do not cache it"]
+  reuse --> infer["infer_internal_dependencies"]
+  enrich --> infer
+  infer --> write["MarkdownGenerator"]
+  write --> modules[".rag_kb/modules/*.md"]
+  write --> index[".rag_kb/project_index.md"]
+  write --> saved[".rag_kb/parse_cache.json"]
+  fail --> written["Knowledge base still written for the files that parsed"]
+  written --> exit2["init exits 2"]
+  index --> bundle["bundle, optional"]
+  modules --> bundle
+  bundle --> context[".rag_kb/full_repo_context.md"]
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│  Repository root                                                    │
-│                                                                     │
-│  RepositoryScanner                                                  │
-│    • loads .gitignore via pathspec                                  │
-│    • skips hidden dirs, binaries, .rag_kb/                          │
-│    • filters by --languages if supplied                             │
-│         │                                                           │
-│         ▼  list[Path]                                               │
-│  ParserEngine.parse_file(path, content)                             │
-│    • detects language via registry                                  │
-│    • dispatches to language-specific extractor                      │
-│    • runs enrich_parsed_file() — URL & DB regex scan                │
-│    • returns ParsedFile dataclass                                   │
-│         │                                                           │
-│         ▼  list[ParsedFile]                                         │
-│  Parse cache (incremental)                                          │
-│    • SHA-256 of each file's bytes → .rag_kb/parse_cache.json        │
-│    • unchanged files: restore ParsedFile from cache, skip parse     │
-│         │                                                           │
-│         ▼                                                           │
-│  ParserEngine.infer_internal_dependencies()                         │
-│    • links imports to internal module paths                         │
-│         │                                                           │
-│         ▼                                                           │
-│  MarkdownGenerator.generate()                                       │
-│    • Jinja2: module.md.j2  → .rag_kb/modules/<name>.md             │
-│    • Jinja2: project_index.md.j2 → .rag_kb/project_index.md        │
-│         │                                                           │
-│         ▼  (optional)                                               │
-│  bundle_knowledge_base()                                            │
-│    • project_index.md first, then modules by relevance (+ budget)   │
-│    • → .rag_kb/full_repo_context.md                                 │
-└─────────────────────────────────────────────────────────────────────┘
-```
+
+The scanner loads `.gitignore`, skips hidden directories, binaries, and `.rag_kb/`, and applies `--languages` when you set it. Parallel `init -j N` keeps at most `4 × N` parses in flight. `-j 1` and `-j 8` write the same bytes on the fixtures and the evaluation corpus.
 
 ---
 
@@ -104,6 +94,15 @@
 ### Language tiers
 
 The tier says how much evidence backs each language. Only **supported** languages have measured extraction accuracy.
+
+```mermaid
+flowchart LR
+  file["Source file"] --> tier{"Which evidence exists?"}
+  tier -->|measured corpus| supported["Supported: Python, TypeScript, JavaScript, Java"]
+  tier -->|fixture only| experimental["Experimental: parsed in tests, accuracy not measured"]
+  tier -->|extension and profile only| untested["Untested: C, C++, PHP, Kotlin, Scala, Swift"]
+```
+
 
 | Tier | Languages | Evidence |
 |------|-----------|----------|
@@ -163,6 +162,19 @@ repo-parser bundle /path/to/my-project
 cat /path/to/my-project/.rag_kb/full_repo_context.md | pbcopy   # macOS clipboard
 ```
 
+```mermaid
+sequenceDiagram
+  participant You
+  participant CLI as repo-parser
+  participant Repo as repository
+  You->>CLI: init PATH
+  CLI->>Repo: read source files
+  CLI->>Repo: write .rag_kb modules, project_index.md, parse_cache.json
+  You->>CLI: bundle PATH
+  CLI->>Repo: read parse_cache.json
+  CLI->>Repo: write .rag_kb/full_repo_context.md
+```
+
 ### Self-index VegaParser
 
 ```bash
@@ -195,6 +207,16 @@ Scans `PATH` (default: current directory), parses every supported source file, a
 | `--workers` | `-j` | int | `0` | Parallel parse workers. `0` = auto (min(CPU count, 8)); `1` = sequential. Tests confirm `-j 1` and `-j 8` write byte-identical output. |
 
 **Exit codes:** `0` on success. `2` when one or more files could not be parsed. The knowledge base is still written, the failed files are listed, and they are retried on the next run.
+
+```mermaid
+flowchart TD
+  run["init"] --> wrote["Write modules, project index, and cache"]
+  wrote --> any{"Any file unreadable or unparsed?"}
+  any -->|no| ok["Exit 0"]
+  any -->|yes| partial["List the failed paths. Exit 2"]
+  partial --> next["Next init retries those files. They were not cached"]
+```
+
 
 **Examples:**
 
@@ -237,6 +259,24 @@ Writes `.rag_kb/full_repo_context.md`: the project index first, then module file
 **Budget.** The bound is always printed on every run (`Budget: unlimited` or `Budget: N tokens`), and the header of the bundle file states it too. `--max-tokens N` caps the bundle at N approximate tokens. The estimate is `ceil(characters / 3)`. This is a rough heuristic, not a tokenizer count. Modules are included whole. A module that does not fit is skipped, and smaller later modules may still fit. Omitted modules are listed at the end under `## Omitted by budget`. The project index is always included, so a budget smaller than the header and index is an error (exit 1) rather than an overrun.
 
 **Relevance.** Without `--query`, ranking uses entry points (`main.py`, `index.ts`, `Main.java`, ...), `main` functions, in-degree (how many internal files import a module, capped at 10), database or URL endpoints, and a penalty for test files. With `--query`, modules whose path, symbols, imports, exports or docstring mention a query term move up. Their direct internal dependencies get a one-hop boost. Matching is case-insensitive and camelCase in the query is split.
+
+```mermaid
+flowchart TD
+  cache["Read the current parse cache"] --> pathf{"--path set?"}
+  pathf -->|yes| keep["Keep modules whose path matches"]
+  pathf -->|no| allmods["Consider every module"]
+  keep --> rank["Rank. Query terms first, otherwise entry points, main, imports, endpoints. Tests rank lower"]
+  allmods --> rank
+  rank --> index["Always include the project index"]
+  index --> capped{"--max-tokens set?"}
+  capped -->|no| unlimited["Budget: unlimited. Include every ranked module"]
+  capped -->|yes| room{"Header and index fit the budget?"}
+  room -->|no| refuse["Exit 1. Budget too small"]
+  room -->|yes| pick["Add whole modules while they fit. List the rest under Omitted by budget"]
+  unlimited --> out["Write the bundle and print Budget, Modules, Size, Characters, Words, ~Tokens"]
+  pick --> out
+```
+
 
 | Argument / Option | Short | Type | Default | Description |
 |-------------------|-------|------|---------|-------------|
@@ -371,6 +411,21 @@ Aggregates across all parsed files:
 
 `init` keeps one cache at `.rag_kb/parse_cache.json`. Each file entry stores the SHA-256 of the file's raw bytes, the module file it produced, and the serialised parse result. On subsequent runs:
 
+```mermaid
+flowchart TD
+  start["init"] --> skip{"--force, corrupt cache, or version or language filter differs?"}
+  skip -->|yes| all["Reparse every selected file"]
+  skip -->|no| each["For each file, compare SHA-256 of its bytes"]
+  each --> hit{"Hash matches the cache entry?"}
+  hit -->|yes| reuse["Restore that parse. Do not call Tree-sitter"]
+  hit -->|no| one["Parse that file and replace its entry"]
+  all --> cleanup["Remove generated modules whose source was deleted or renamed"]
+  reuse --> cleanup
+  one --> cleanup
+  cleanup --> save["Write parse_cache.json via a temp file, then rename"]
+```
+
+
 | File state | Action |
 |-----------|--------|
 | **Unchanged** (SHA-256 matches) | Restore the parse result from the cache — Tree-sitter is not invoked |
@@ -405,7 +460,18 @@ After Tree-sitter parsing, every file is scanned by `endpoints.py` regardless of
 | Env var assignments | `DATABASE_URL`, `PGHOST`, `REDIS_URL`, `SPRING_DATASOURCE_URL`, … |
 | KV config lines | `host = db.internal`, `port: 5432`, `"database": "myapp"` |
 
-**Likely secrets are always redacted** to `***` in every output: module docs, the project index, the parse cache, the bundle and the log. This covers URL passwords (including passwords that contain `@`), query tokens, common key formats (AWS, GitHub, Slack, Google, Stripe, JWT, PEM headers) and `password`/`secret`/`token`/`api_key` assignments. Placeholders such as `changeme` are kept. Redaction cannot be turned off.
+**Likely secrets are always redacted** to `***` in every output. This covers URL passwords (including passwords that contain `@`), query tokens, common key formats (AWS, GitHub, Slack, Google, Stripe, JWT, PEM headers) and `password`/`secret`/`token`/`api_key` assignments. Placeholders such as `changeme` are kept. Redaction cannot be turned off.
+
+```mermaid
+flowchart LR
+  source["Source text"] --> rules["redaction.py"]
+  rules --> modules["Module docs"]
+  rules --> index["Project index"]
+  rules --> cache["Parse cache"]
+  rules --> bundle["Bundle"]
+  rules --> logs["Logs"]
+```
+
 
 `init` prints how many likely secrets it redacted. Add `--report-secrets` to list each one by category, file and line. Values are never printed.
 
