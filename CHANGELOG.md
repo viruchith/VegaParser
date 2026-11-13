@@ -8,6 +8,10 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- Each worker thread now builds its own tree-sitter parser. `get_parser()` from the language pack can return one shared parser on Linux, and that parser is not safe to use from two threads. `init -j N` was exposed to that.
+- Help-text tests ignore terminal color codes, which on Linux split flag names such as `--force` and `--log-target`.
+
 ### Changed
 - README diagrams are now Mermaid. The indexing pipeline, language tiers, quick start, `init` exit codes, bundle budgeting, cache decisions, and secret-redaction surfaces each have a flowchart or sequence diagram. The ASCII pipeline diagram is removed. Behaviour is unchanged.
 

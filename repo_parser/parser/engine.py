@@ -8,7 +8,8 @@ from dataclasses import asdict
 import logging
 from threading import local
 
-from tree_sitter_language_pack import get_parser, has_language
+from tree_sitter import Parser
+from tree_sitter_language_pack import get_language, has_language
 
 from repo_parser.cache import _dict_to_parsed_file
 from repo_parser.models import ParsedFile
@@ -51,6 +52,16 @@ def _grammar_for_language(lang_name: str) -> str:
     return lang_name
 
 
+def _new_parser(grammar: str) -> Parser:
+    """Build a new parser for this grammar.
+
+    ``get_parser()`` from tree-sitter-language-pack can hand back one shared
+    parser. That is unsafe: a tree-sitter parser must not be used from two
+    threads at once. Callers cache the result per thread.
+    """
+    return Parser(get_language(grammar))
+
+
 def _get_ts_parser(grammar: str) -> ParserAdapter:
     """Return a thread-local cached ParserAdapter for *grammar*.
 
@@ -62,11 +73,11 @@ def _get_ts_parser(grammar: str) -> ParserAdapter:
     if cache is None:
         cache = {}
         _parser_tls.parsers = cache
-    p = cache.get(grammar)
-    if p is None:
-        p = ParserAdapter(get_parser(grammar))
-        cache[grammar] = p
-    return p
+    adapter = cache.get(grammar)
+    if adapter is None:
+        adapter = ParserAdapter(_new_parser(grammar))
+        cache[grammar] = adapter
+    return adapter
 
 
 def _parse_file_isolated(filepath: str, source: str, lang_name: str) -> ParsedFile | None:
@@ -125,34 +136,17 @@ for _lang in PROFILES:
 class ParserEngine:
     """Parse source files using tree-sitter."""
 
-    def __init__(self) -> None:
-        self._thread_local = local()
-
     def _get_parser(self, lang_name: str):
-        cache = getattr(self._thread_local, "parser_cache", None)
-        if cache is None:
-            cache = {}
-            self._thread_local.parser_cache = cache
-
-        if lang_name not in cache:
-            grammar = lang_name
-            if lang_name == "kubernetes":
-                grammar = "yaml"
-            elif lang_name == "plsql":
-                grammar = "sql"
-            elif lang_name == "shell":
-                grammar = "bash"
-            elif lang_name == "csharp":
-                grammar = "csharp"
-            if not has_language(grammar):
-                logger.warning("Tree-sitter grammar not available for: %s", grammar)
-                return None
-            try:
-                cache[lang_name] = get_parser(grammar)
-            except Exception as exc:
-                logger.warning("Could not load tree-sitter parser for %s: %s", grammar, exc)
-                return None
-        return cache[lang_name]
+        """The tree-sitter parser for this thread. Reused for later files, never shared."""
+        grammar = _grammar_for_language(lang_name)
+        if not has_language(grammar):
+            logger.warning("Tree-sitter grammar not available for: %s", grammar)
+            return None
+        try:
+            return _get_ts_parser(grammar)._parser
+        except Exception as exc:
+            logger.warning("Could not load tree-sitter parser for %s: %s", grammar, exc)
+            return None
 
     def parse_file(self, filepath: str, source: str) -> ParsedFile | None:
         """Parse one file and redact it. Every output surface receives redacted data only."""

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 
@@ -11,6 +12,12 @@ from repo_parser.cli import app
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
 runner = CliRunner()
+# Rich colors option names on a TTY, which splits "--log-target" with escape codes.
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _visible(text: str) -> str:
+    return _ANSI.sub("", text)
 
 
 def _copy_fixtures(tmp_path) -> Path:
@@ -59,14 +66,15 @@ def test_cli_bundle_without_init_fails(tmp_path):
 def test_cli_init_help_lists_cache_and_log_flags():
     result = runner.invoke(app, ["init", "--help"])
     assert result.exit_code == 0
+    help_text = _visible(result.output)
     for flag in ("--force", "--no-cache", "--log-target"):
-        assert flag in result.output
+        assert flag in help_text
 
 
 def test_cli_bundle_help_lists_log_target():
     result = runner.invoke(app, ["bundle", "--help"])
     assert result.exit_code == 0
-    assert "--log-target" in result.output
+    assert "--log-target" in _visible(result.output)
 
 
 def test_cli_rejects_unknown_log_target(tmp_path, monkeypatch):

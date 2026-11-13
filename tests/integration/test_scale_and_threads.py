@@ -102,22 +102,28 @@ def test_shared_engine_is_safe_across_threads(in_tmp):
 
 
 def test_threads_have_independent_parsers():
-    """Each worker thread builds its own parser; the main thread's cache is not shared."""
+    """Each worker thread gets its own parser object. A shared one is not thread-safe.
+
+    The parsers are kept alive until the assertion. Recording only ``id()`` and
+    then letting the thread exit frees a thread-local parser, and CPython can
+    reuse that address for the next thread.
+    """
     engine = ParserEngine()
-    seen: dict[str, int] = {}
+    seen: dict[str, object] = {}
     lock = threading.Lock()
 
     def grab():
         parser = engine._get_parser("python")
         with lock:
-            seen[threading.current_thread().name] = id(parser)
+            seen[threading.current_thread().name] = parser
 
     threads = [threading.Thread(target=grab, name=f"t{i}") for i in range(4)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    assert len(set(seen.values())) == len(seen)
+    assert all(parser is not None for parser in seen.values())
+    assert len({id(parser) for parser in seen.values()}) == len(seen)
 
 
 def test_submission_is_bounded(in_tmp, monkeypatch):
