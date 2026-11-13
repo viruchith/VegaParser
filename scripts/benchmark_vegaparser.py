@@ -10,6 +10,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Iterator
@@ -116,6 +117,134 @@ class RunResult:
     returncode: int
     module_count: int
     stderr_tail: str = ""
+    index_present: bool = False
+    # Peak working set of the child process. None when the platform cannot report it.
+    peak_rss_bytes: int | None = None
+    # Total bytes written under .rag_kb after the run.
+    output_bytes: int = 0
+
+
+RSS_POLL_SECONDS = 0.1
+"""How often the child's memory is sampled. Peaks shorter than this can be missed."""
+
+# Never copied when a local path is benchmarked: VCS data, virtualenvs, caches and outputs.
+LOCAL_COPY_IGNORE = shutil.ignore_patterns(
+    ".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache", ".rag_kb", "repo-parser.log"
+)
+
+
+def _windows_tree_peak_rss(root_pid: int) -> int | None:
+    """Sum of peak working sets over root_pid and its descendants (ctypes, no psutil).
+
+    The venv's python.exe is a launcher that starts the real interpreter as a child process,
+    so the root process alone under-reports. Summing per-process peaks can overstate the true
+    simultaneous peak; that is the documented, conservative direction.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class ProcessMemoryCounters(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+    class ProcessEntry32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    th32cs_snapprocess = 0x00000002
+    process_query_limited_information = 0x1000
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+
+    # Map parent -> children from a process snapshot.
+    snapshot = kernel32.CreateToolhelp32Snapshot(th32cs_snapprocess, 0)
+    if snapshot == ctypes.c_void_p(-1).value:
+        return None
+    children: dict[int, list[int]] = {}
+    try:
+        entry = ProcessEntry32()
+        entry.dwSize = ctypes.sizeof(ProcessEntry32)
+        ok = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while ok:
+            children.setdefault(entry.th32ParentProcessID, []).append(entry.th32ProcessID)
+            ok = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+
+    tree = [root_pid]
+    for pid in tree:  # breadth-first walk; the list grows while iterating
+        tree.extend(children.get(pid, []))
+
+    total = 0
+    measured = False
+    for pid in tree:
+        handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+        if not handle:
+            continue  # the process may have exited, or access may be denied
+        try:
+            counters = ProcessMemoryCounters()
+            counters.cb = ctypes.sizeof(ProcessMemoryCounters)
+            if psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+                total += int(counters.PeakWorkingSetSize)
+                measured = True
+        finally:
+            kernel32.CloseHandle(handle)
+    return total if measured else None
+
+
+def _peak_rss_bytes(pid: int) -> int | None:
+    """Best available peak/current memory for a live process tree. None when unavailable."""
+    if sys.platform == "win32":
+        return _windows_tree_peak_rss(pid)
+    status = Path(f"/proc/{pid}/status")
+    if status.is_file():
+        # Linux keeps the peak itself (VmHWM, in kB).
+        for line in status.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("VmHWM:"):
+                return int(line.split()[1]) * 1024
+        return None
+    # Other POSIX (e.g. macOS): sample the current RSS (kB) and keep the max of the samples.
+    completed = subprocess.run(
+        ["ps", "-o", "rss=", "-p", str(pid)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+    )
+    value = completed.stdout.strip()
+    return int(value) * 1024 if value.isdigit() else None
+
+
+def _output_bytes(rag_kb: Path) -> int:
+    if not rag_kb.is_dir():
+        return 0
+    return sum(p.stat().st_size for p in rag_kb.rglob("*") if p.is_file())
+
+
+def _max_optional(a: int | None, b: int | None) -> int | None:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return max(a, b)
 
 
 SUITE: list[BenchmarkTarget] = [
@@ -170,7 +299,38 @@ def slug_from_repo(repo_url: str) -> str:
 
 
 def clone_path(workspace: Path, target: BenchmarkTarget) -> Path:
+    if target.tier == LOCAL_TIER:
+        return workspace / "local" / target.id
     return workspace / slug_from_repo(target.repo)
+
+
+LOCAL_TIER = "local"
+"""Tier used for `--local PATH` targets. They are copied into the workspace, never run in place."""
+
+
+def local_target(path: Path) -> BenchmarkTarget:
+    resolved = path.resolve()
+    return BenchmarkTarget(
+        id=f"local-{resolved.name}",
+        repo=str(resolved),
+        tier=LOCAL_TIER,
+        languages=(),
+        notes=f"Local copy of {resolved}",
+    )
+
+
+def _copy_local(target: BenchmarkTarget, workspace: Path, verbose: bool) -> Path:
+    """Copy a local directory into the workspace so the user's tree is never written to."""
+    source = Path(target.repo)
+    if not source.is_dir():
+        raise RuntimeError(f"not a directory: {source}")
+    dest = clone_path(workspace, target)
+    if dest.exists():
+        shutil.rmtree(dest)
+    if verbose:
+        _log(f"copying {source} -> {dest}", indent=1, prefix=target.id)
+    shutil.copytree(source, dest, ignore=LOCAL_COPY_IGNORE)
+    return dest
 
 
 def artifact_path(workspace: Path, target: BenchmarkTarget) -> Path:
@@ -188,6 +348,9 @@ def ensure_repo(
     verbose: bool = False,
     shutdown: threading.Event | None = None,
 ) -> Path:
+    if target.tier == LOCAL_TIER:
+        # Always re-copy so the benchmark sees the current state of the local tree.
+        return _copy_local(target, workspace, verbose)
     path = clone_path(workspace, target)
     if refresh and path.exists():
         if verbose:
@@ -243,23 +406,31 @@ def run_vegaparser(repo_path: Path, languages: tuple[str, ...]) -> RunResult:
     if languages:
         cmd.extend(["--languages", ",".join(languages)])
 
-    start = time.perf_counter()
-    completed = subprocess.run(
-        cmd,
-        cwd=repo_path,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    duration = time.perf_counter() - start
+    # stderr goes to a temp file so the child never blocks on a full pipe while we sample it.
+    with tempfile.TemporaryFile(mode="w+b") as stderr_file:
+        start = time.perf_counter()
+        proc = subprocess.Popen(cmd, cwd=repo_path, stdout=subprocess.DEVNULL, stderr=stderr_file)
+        peak: int | None = None
+        while proc.poll() is None:
+            sample = _peak_rss_bytes(proc.pid)
+            if sample is not None and (peak is None or sample > peak):
+                peak = sample
+            time.sleep(RSS_POLL_SECONDS)
+        duration = time.perf_counter() - start
+        stderr_file.seek(0)
+        stderr_text = stderr_file.read().decode("utf-8", errors="replace")
 
-    module_count = len(list((repo_path / ".rag_kb" / "modules").glob("*.md")))
-    stderr_tail = "\n".join((completed.stderr or "").splitlines()[-8:])
+    rag_kb = repo_path / ".rag_kb"
+    module_count = len(list((rag_kb / "modules").glob("*.md")))
+    stderr_tail = "\n".join(stderr_text.splitlines()[-8:])
     return RunResult(
         duration_seconds=duration,
-        returncode=completed.returncode,
+        returncode=proc.returncode,
         module_count=module_count,
         stderr_tail=stderr_tail,
+        index_present=(rag_kb / "project_index.md").is_file(),
+        peak_rss_bytes=peak,
+        output_bytes=_output_bytes(rag_kb),
     )
 
 
@@ -310,6 +481,8 @@ def _cancelled_result(target: BenchmarkTarget, started_at: str) -> dict:
         "cold_min_s": None,
         "cold_max_s": None,
         "warm_s": None,
+        "peak_rss_bytes": None,
+        "output_bytes": 0,
         "workspace": "",
         "artifact_rag_kb": "",
         "artifact_log": "",
@@ -355,6 +528,8 @@ def run_target(
                 "cold_min_s": None,
                 "cold_max_s": None,
                 "warm_s": None,
+                "peak_rss_bytes": None,
+                "output_bytes": 0,
                 "workspace": "",
                 "artifact_rag_kb": "",
                 "artifact_log": "",
@@ -364,6 +539,9 @@ def run_target(
 
         cold_times: list[float] = []
         module_count = 0
+        index_present = False
+        output_bytes = 0
+        peak_rss_bytes: int | None = None
         last_rc = 0
         last_error = ""
 
@@ -378,6 +556,9 @@ def run_target(
                 result = run_vegaparser(repo_path, target.languages)
                 cold_times.append(result.duration_seconds)
                 module_count = result.module_count
+                index_present = result.index_present
+                output_bytes = result.output_bytes
+                peak_rss_bytes = _max_optional(peak_rss_bytes, result.peak_rss_bytes)
                 last_rc = result.returncode
                 if verbose:
                     _log(
@@ -399,6 +580,9 @@ def run_target(
                 result = run_vegaparser(repo_path, target.languages)
                 warm_seconds = result.duration_seconds
                 module_count = result.module_count
+                index_present = result.index_present
+                output_bytes = result.output_bytes
+                peak_rss_bytes = _max_optional(peak_rss_bytes, result.peak_rss_bytes)
                 last_rc = result.returncode
                 if verbose:
                     _log(
@@ -415,6 +599,9 @@ def run_target(
         # Mark interrupted only when we exited before completing all intended cold runs.
         if shutdown is not None and shutdown.is_set() and not last_error and len(cold_times) < repeat:
             last_error = "interrupted"
+        # A run that exits 0 but writes nothing useful is a failure, not a success.
+        if last_rc == 0 and not last_error and (module_count == 0 or not index_present):
+            last_error = "empty output (no modules or no project index)"
         status = "ok" if last_rc == 0 and not last_error else last_error or f"exit {last_rc}"
         artifact_rag_kb, artifact_log = snapshot_target_outputs(
             repo_path, workspace, target, verbose=verbose
@@ -432,6 +619,8 @@ def run_target(
             "cold_min_s": min(cold_times) if cold_times else None,
             "cold_max_s": max(cold_times) if cold_times else None,
             "warm_s": warm_seconds,
+            "peak_rss_bytes": peak_rss_bytes,
+            "output_bytes": output_bytes,
             "workspace": str(repo_path),
             "artifact_rag_kb": artifact_rag_kb,
             "artifact_log": artifact_log,
@@ -454,36 +643,41 @@ def short_text(value: str, limit: int = 80) -> str:
     return value if len(value) <= limit else value[: limit - 3] + "..."
 
 
+def format_mb(value: int | None) -> str:
+    return "-" if value is None else f"{value / (1024 * 1024):.1f}"
+
+
+def format_kb(value: int | None) -> str:
+    return "-" if value is None else f"{value / 1024:.1f}"
+
+
 def _table_lines(rows: list[dict]) -> list[str]:
-    headers = ["id", "tier", "languages", "cold_avg_s", "warm_s", "modules", "status"]
+    headers = ["id", "tier", "languages", "cold_avg_s", "warm_s", "peak_mb", "out_kb", "modules", "status"]
     widths = {header: len(header) for header in headers}
+
+    def cells(row: dict) -> list[str]:
+        return [
+            row["id"],
+            row["tier"],
+            row["languages"],
+            format_seconds(row["cold_avg_s"]),
+            format_seconds(row["warm_s"]),
+            format_mb(row.get("peak_rss_bytes")),
+            format_kb(row.get("output_bytes")),
+            str(row["modules"]),
+            short_text(row["status"]),
+        ]
+
     for row in rows:
-        widths["id"] = max(widths["id"], len(row["id"]))
-        widths["tier"] = max(widths["tier"], len(row["tier"]))
-        widths["languages"] = max(widths["languages"], len(row["languages"]))
-        widths["cold_avg_s"] = max(widths["cold_avg_s"], len(format_seconds(row["cold_avg_s"])))
-        widths["warm_s"] = max(widths["warm_s"], len(format_seconds(row["warm_s"])))
-        widths["modules"] = max(widths["modules"], len(str(row["modules"])))
-        widths["status"] = max(widths["status"], len(short_text(row["status"])))
+        for header, value in zip(headers, cells(row)):
+            widths[header] = max(widths[header], len(value))
 
     def line(values: list[str]) -> str:
         return "  ".join(value.ljust(widths[header]) for value, header in zip(values, headers))
 
     lines = [line(headers), "  ".join("-" * widths[h] for h in headers)]
     for row in rows:
-        lines.append(
-            line(
-                [
-                    row["id"],
-                    row["tier"],
-                    row["languages"],
-                    format_seconds(row["cold_avg_s"]),
-                    format_seconds(row["warm_s"]),
-                    str(row["modules"]),
-                    short_text(row["status"]),
-                ]
-            )
-        )
+        lines.append(line(cells(row)))
     return lines
 
 
@@ -498,6 +692,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tier", choices=["heavy", "light", "all"], default="all", help="Only run heavy or light entries.")
     parser.add_argument("--language", action="append", dest="languages", help="Only run entries that include this language filter.")
     parser.add_argument("--repo", action="append", dest="repos", help="Only run specific benchmark ids.")
+    parser.add_argument(
+        "--local",
+        action="append",
+        dest="local_paths",
+        type=Path,
+        metavar="PATH",
+        help="Benchmark a local directory, copied into the workspace and never modified. With --local alone, only local paths run.",
+    )
     parser.add_argument("--repeat", type=int, default=1, help="How many cold runs to average per repo.")
     parser.add_argument("--warm", action="store_true", help="Run a second warm-cache pass after the cold run.")
     parser.add_argument("--refresh", action="store_true", help="Reclone benchmark repositories before running.")
@@ -533,7 +735,18 @@ def matches(target: BenchmarkTarget, args: argparse.Namespace) -> bool:
 
 def main() -> int:
     args = parse_args()
-    selected = [target for target in SUITE if matches(target, args)]
+    local_paths = args.local_paths or []
+    suite_filtered = bool(args.repos or args.languages or args.tier != "all")
+    # --local alone runs only the local paths; add --repo/--tier/--language to include suite entries.
+    if local_paths and not suite_filtered:
+        selected: list[BenchmarkTarget] = []
+    else:
+        selected = [target for target in SUITE if matches(target, args)]
+    for path in local_paths:
+        if not path.is_dir():
+            _log(f"--local path is not a directory: {path}", stderr=True)
+            return 2
+        selected.append(local_target(path))
 
     if args.list:
         for target in selected:
@@ -644,7 +857,10 @@ def main() -> int:
         args.json_path.parent.mkdir(parents=True, exist_ok=True)
         args.json_path.write_text(json.dumps(results, indent=2, sort_keys=True), encoding="utf-8")
 
-    return 1 if interrupted else 0
+    failed = [r["id"] for r in results if r["status"] != "ok"]
+    if failed:
+        _log(f"{len(failed)} target(s) did not produce ok output: {', '.join(failed)}", stderr=True)
+    return 1 if interrupted or failed else 0
 
 
 if __name__ == "__main__":

@@ -9,6 +9,110 @@ Versions follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- Each worker thread now builds its own tree-sitter parser. `get_parser()` from the language pack can return one shared parser on Linux, and that parser is not safe to use from two threads. `init -j N` was exposed to that.
+- Help-text tests ignore terminal color codes, which on Linux split flag names such as `--force` and `--log-target`.
+
+### Changed
+- README diagrams are now Mermaid. The indexing pipeline, language tiers, quick start, `init` exit codes, bundle budgeting, cache decisions, and secret-redaction surfaces each have a flowchart or sequence diagram. The ASCII pipeline diagram is removed. Behaviour is unchanged.
+
+---
+
+## [0.3.0] — 2026-11-12
+
+### Breaking changes
+Read this before upgrading. Scripts and CI that depend on exit codes or bundle output are affected.
+
+- **`init` exits `2` when a file fails to parse.** The knowledge base is still written. Before, a partial parse exited `0`.
+- **`bundle` order is relevance order**, not alphabetical. Index first. Budgets now apply, so output for the same repo can change.
+- **Bundle token estimate is `characters / 3`** (was `characters // 4`). It is still an approximation, not a tokenizer count.
+- **Parse cache is version `3`**, stored in one file, `.rag_kb/parse_cache.json`. Older caches are discarded, so the first `init` after upgrading reparses everything.
+- **Removed from the library API:** `repo_parser.cache.IndexCache`, `compute_hash` and `file_signature`.
+  The `.rag_kb/.cache/manifest.json` file from 0.2.0 is no longer read or written. Delete it if present.
+- **Benchmark status is stricter.** A run with no modules or no `project_index.md` is `empty output`, and the script exits `1`.
+- **Language support is now tiered.** Only Python, TypeScript/JavaScript and Java have measured extraction accuracy.
+  The earlier "20+ languages" claim is removed. See `README.md → Language tiers`.
+- **Coverage claims are removed.** The README and DESIGN no longer state a coverage figure or a test count.
+  CI still enforces a floor of 80 % (`--cov-fail-under=80`). The CI matrix is unchanged.
+
+### Added
+
+#### Context budgeting for `bundle`
+- `bundle --max-tokens N` caps the bundle at about N tokens. The estimate is `ceil(characters / 3)`, labelled
+  approximate everywhere. Whole modules only. The project index is always included, so a budget smaller than
+  the header and index is an error (exit 1), not an overrun. Omitted modules are listed at the end.
+- The bound is printed on every run (`Budget: unlimited` or `Budget: N tokens`) and in the bundle header.
+- `bundle --query TEXT` (`-q`) ranks modules whose path, symbols, imports, exports or docstring match first,
+  and gives their direct internal dependencies a one-hop boost.
+- `bundle --path GLOB` (repeatable) keeps only modules whose repo path matches a gitignore-style pattern.
+- Without a query, ranking uses entry points, `main` functions, in-degree, endpoints and a test-file penalty.
+  Ties break on depth, then path, so output is deterministic.
+- `bundle --output` must be a plain `*.md` file name inside `.rag_kb/`. Paths and `project_index.md` are rejected.
+- Each module block still carries its source path and the line range of every class and function.
+
+#### Offline orientation evaluation
+- `scripts/evaluate_orientation.py` measures extraction precision/recall and top-k retrieval against
+  hand-written Python, TypeScript and Java corpora under `tests/eval_corpus/`. No LLM, no network.
+  Results and method: `docs/evaluation.md`.
+
+#### Secret redaction on every output surface
+- New `repo_parser/redaction.py` is the single source of redaction rules. It covers URL credentials
+  (including passwords containing `@`), query tokens, AWS/GitHub/Slack/Google/Stripe keys, JWTs,
+  PEM headers and `password`/`secret`/`token`/`api_key` assignments. Placeholders are kept.
+- Redaction runs on every parsed file, in the cache, module docs, project index, bundle and log.
+  Context snippets are redacted before truncation. Stack-detection output is redacted too.
+- `init --report-secrets` lists category, file and line for each likely secret. Values are never printed.
+  Every `init` prints the redacted total.
+
+#### Cache lifecycle
+- Stale module files are removed exactly. A module is removed when its source was deleted or renamed. Only generated
+  files under `.rag_kb/modules/` are candidates, identified by their `---` / `filepath:` header. Files you add there are never touched.
+- `init --force` (alias `--no-cache`) reparses every file and rewrites the cache.
+- `--log-target file|console|both` on `init` and `bundle`. The default is `file`, which writes `repo-parser.log`
+  to the current directory. `console` writes no log file.
+- The cache is written atomically (temporary file, then `os.replace`), so an interrupted run cannot leave a partial file.
+- `init` prints reused, parsed and removed counts. Reused files are not parsed again.
+
+#### Scale validation
+- `init` exits `2` when any file fails to parse. The knowledge base is still written, the failed files are listed,
+  and failed files are not cached, so the next run retries them.
+- Parallel parsing (`init -j N`) keeps at most `4 × N` tasks in flight. Output is byte-identical to `-j 1`
+  (tested on the fixtures and the eval corpus).
+- `scripts/benchmark_vegaparser.py --local PATH` benchmarks a local directory. It is copied into the workspace, never modified.
+- Benchmark rows now record `peak_mb` (peak memory, sampled) and `out_kb` (output size). Measured values and method: `README.md → Benchmarking`.
+
+### Changed
+- **Benchmark status is stricter.** A run that exits `0` but writes no modules or no `project_index.md` is `empty output`
+  and not `ok`. The benchmark exits `1` when any target is not `ok`.
+- **`init` exit code `2` on parse failures** (new). Scripts that relied on `0` for a partial parse must check for `2`.
+
+- **Bundle order is now relevance order** (was alphabetical by file name). Without a query the order is deterministic
+  and favours entry points and widely imported modules. Index first, as before.
+- **Bundle token estimate is `characters / 3`** (was `characters // 4`). The estimate is labelled approximate. It is
+  still not a tokenizer count.
+- `ParserEngine.infer_internal_dependencies` delegates to the multi-language resolver in
+  `repo_parser/parser/dependencies.py`, which `init` and the evaluation script now both use.
+- `bundle` needs a parse cache written by the current version. Run `init` again after upgrading.
+- Parse cache version is now `3`. Earlier caches are discarded. The cache is one file, `.rag_kb/parse_cache.json`,
+  keyed by the SHA-256 of each file's bytes instead of its mtime and size. It is also ignored when the VegaParser
+  version or `--languages` filter differs from the run that wrote it.
+- **Breaking:** `repo_parser.cache.IndexCache`, `compute_hash` and `file_signature` were removed. The
+  `.rag_kb/.cache/manifest.json` file from 0.2.0 is no longer read or written. Delete it if present.
+- Version is `0.3.0` in both `pyproject.toml` and `repo_parser/__init__.py`. A test enforces that they match.
+- `MarkdownGenerator.kb_name_map` is now public. `RepositoryScanner.read_bytes` returns the raw bytes that the cache hashes.
+
+### Fixed
+
+#### Dependency resolution
+- `init` used a stem-only resolver, so dotted Python imports and relative JS/TS imports never linked. It now uses the
+  multi-language resolver. On the orientation corpus, dependency recall rose from 0% to 85.7% with 100% precision
+  (24 true positives, 4 missed). Measured by `scripts/evaluate_orientation.py`, see `docs/evaluation.md`.
+
+#### Stack detection
+- A missing root `pom.xml` no longer logs a spurious "Could not parse" warning on every run.
+
+#### Endpoint extraction for Java, SQL and PLSQL
+- URL and database endpoint extraction now runs for Java, SQL and PLSQL files. Previously these
+  files skipped the endpoint step entirely.
 
 #### Parser stability on large repositories
 - Eliminated tree-sitter segmentation faults during repository indexing by:

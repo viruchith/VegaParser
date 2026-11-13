@@ -17,7 +17,7 @@ Thank you for your interest in contributing. This document is the **technical re
    - [parser/queries — language extractors](#parserqueries--language-extractors)
    - [parser/extractors/endpoints.py](#parserextractorsendpointspy)
    - [generator/markdown.py](#generatormarkdownpy)
-   - [generator/bundle.py](#generatorbundlepy)
+   - [generator/bundle.py](#generatorbundlepy) (includes `generator/context.py`)
    - [generator/templates](#generatortemplates)
    - [stack/detector.py](#stackdetectorpy)
    - [cache.py](#cachepy)
@@ -47,7 +47,7 @@ pip install -r requirements.txt -r requirements-dev.txt
 pip install -e .                 # editable install for the console script
 
 # Verify
-pytest                           # 342 tests should pass
+pytest                           # the full suite should pass
 repo-parser --help
 ```
 
@@ -58,7 +58,7 @@ repo-parser --help
 | `typer` | CLI framework — `app.command()` decorators, argument parsing |
 | `rich` | Terminal output — `Console`, progress bar, spinner |
 | `tree-sitter` | Tree-sitter Python bindings |
-| `tree-sitter-language-pack` | Pre-built grammars for 30+ languages in one wheel |
+| `tree-sitter-language-pack` | Pre-built grammars for many languages in one wheel. Which languages VegaParser supports is in `README.md → Language tiers` |
 | `pathspec` | `.gitignore` pattern matching |
 | `Jinja2` | Markdown template rendering |
 | `PyYAML` | YAML parsing in tests (frontmatter validation) |
@@ -132,7 +132,7 @@ All shared data classes. No logic — pure `@dataclass` definitions.
 | `ExternalUrl` | `url`, `line`, `context` | HTTP/WS/FTP URL found in source |
 | `DatabaseEndpoint` | `connection_type`, `host`, `port`, `user`, `schema`, `database`, `line`, `context`, `raw_redacted` | DB/broker connection detail; password always redacted |
 
-**Serialisation note:** `dataclasses.asdict()` is used in `cache.py` to serialise `ParsedFile` to JSON. Add new fields to all dataclasses carefully — the cache deserialiser in `_dict_to_parsed_file()` must be updated in sync.
+**Serialisation note:** `dataclasses.asdict()` is used in `cache.py` to serialise `ParsedFile` to JSON. Add new fields to all dataclasses carefully — the cache deserialiser `parsed_file_from_dict()` must be updated in sync, and `CACHE_VERSION` bumped if old payloads would be misread.
 
 ---
 
@@ -143,7 +143,7 @@ All shared data classes. No logic — pure `@dataclass` definitions.
 ```python
 scanner = RepositoryScanner(root, languages={"python", "go"}, extensions={".py", ".go"})
 files = scanner.discover()   # list[Path] — repo-relative
-content = scanner.read_file(files[0])
+content = scanner.read_file(files[0])  # decodes like the cache path (see decode_source)
 ```
 
 **Key internals:**
@@ -205,7 +205,7 @@ engine.infer_internal_dependencies(parsed_files)
 
 **Thread-safety note:** tree-sitter parsers are not shared across threads. Each worker thread keeps its own parser cache.
 
-**`infer_internal_dependencies`** builds a stem map of all known module paths, then for each `ParsedFile`, tries to resolve each import token against that map. Relative imports (starting with `.`) are resolved relative to the file's directory. Only exact matches are linked — this is intentionally conservative.
+**`infer_internal_dependencies(parsed_files, sources=None)`** delegates to `repo_parser/parser/dependencies.py`, the one resolver used by `init` and by `scripts/evaluate_orientation.py`. It resolves per language: Python dotted imports and relative imports, JS/TS relative imports with extension and `index` fallbacks, Java fully qualified names (needs `sources` to read `package` lines), Kotlin, and Python bare stems as a last resort. Only resolved repository files are linked, so it stays conservative. Its accuracy is measured in `docs/evaluation.md`.
 
 **`PARSERS` dict** — populated at module level; also extended with `PROFILES` entries from `common_queries.py`:
 
@@ -328,13 +328,7 @@ Runs **on every parsed file** after language-specific extraction, regardless of 
 
 7. **`URL_PATTERN`** — HTTP/WS/FTP URLs; skips localhost/127.0.0.1/0.0.0.0; skips URIs already matched by `CONN_URI_PATTERN`.
 
-**`redact_secrets(value)`** — two-pass redaction:
-```python
-# Pass 1: ://user:password@  →  ://user:***@
-re.sub(r"://([^:/@]*):([^@/]+)@", r"://\1:***@", value)
-# Pass 2: password=value  →  password=***
-re.sub(r"(?i)(password|passwd|pwd|secret|token)\s*[=:]\s*['\"]?[^'\"#\s,]+", r"\1=***", value)
-```
+**`redact_secrets(value)`** delegates to `repo_parser/redaction.py` (`redact_text`). That module holds the full rule list (URL credentials, query secrets, key formats, credential assignments) and is the only place redaction rules are defined. `ParserEngine.parse_file` applies it to every parsed file. See `DESIGN.md → Secret redaction` for the categories and placeholder rules.
 
 **Known limitations** (documented in `DESIGN.md`):
 - Multi-line string concatenation (e.g. `"postgres://" + password + "@host"`) — not detected
@@ -372,9 +366,20 @@ Examples:
 
 ### `generator/bundle.py`
 
-`bundle_knowledge_base(root, output_name)` concatenates `.rag_kb/` into a single file.
+`bundle_knowledge_base(root, output_name, *, max_tokens=None, query=None, paths=None)` concatenates `.rag_kb/` into a single file and returns a `BundleResult` (path, characters, included, omitted, candidates).
 
-**Ordering:** HTML comment header → `project_index.md` → `modules/*.md` (alphabetical by filename).
+Ranking and budget selection live in `generator/context.py`, which is pure and has no I/O:
+- `context_file_from_cache(path, module, parsed)` builds the facts used for ranking from the parse cache.
+- `rank_files(files, query)` scores files. Ties break on depth, then path. A query adds to the score for name hits (path, symbols, weight 3) and detail hits (imports, exports, docstring, weight 1), and gives a one-hop boost to the direct dependencies of matched files.
+- `filter_by_paths(files, patterns)` applies gitignore-style `--path` globs.
+- `select_blocks(sizes, budget_chars, fixed_chars, reserve)` takes blocks in rank order and skips any that do not fit. The omitted-list reserve is iterated to a fixed point. It raises `BudgetError` when the fixed text plus the reserve do not fit, and never returns a selection that exceeds the budget.
+- `estimate_tokens(chars) = ceil(chars / 3)`. The budget is held in characters, and `chars <= 3 * max_tokens` is exactly equivalent to `estimate <= max_tokens`.
+
+**Ordering:** HTML comment header → `project_index.md` → `modules/*.md` in rank order.
+
+**Header:** the budget, ranking mode, query and path filter are written as HTML comments, so the bundle states its own bound.
+
+**Omitted list:** `## Omitted by budget` lists at most 100 paths, then `- ... and N more`.
 
 **Separator** between each module file:
 ```
@@ -383,9 +388,9 @@ Examples:
 ---
 ```
 
-`bundle_stats(bundle_path)` returns `{characters, words, bytes, size_human, tokens_estimate}` where `tokens_estimate = char_count // 4`.
+`bundle_stats(bundle_path)` returns `{characters, words, bytes, size_human, tokens_estimate}` where `tokens_estimate = ceil(characters / 3)`. This is an approximation, and the CLI labels it that way.
 
-Raises `BundleError` (not `SystemExit`) when `.rag_kb/` is missing or contains no Markdown files.
+Raises `BundleError` (not `SystemExit`) when `.rag_kb/` or its current parse cache is missing, when `--output` is not a plain `*.md` name, when `--max-tokens` is below 1, or when the budget is too small for the header, index, or omitted list.
 
 ---
 
@@ -438,37 +443,48 @@ Parsing is line-by-line for all formats; `json.loads` for `package.json`. Missin
 
 ### `cache.py`
 
-Incremental caching is persisted to `.rag_kb/parse_cache.json`.
+The parse cache is a single file, `.rag_kb/parse_cache.json`.
 
-**Cache payload format:**
+**Cache payload format** (`CACHE_VERSION = 3`):
 ```json
 {
-  "version": 1,
+  "version": 3,
+  "tool_version": "0.3.0",
   "filter": {
     "languages": ["python"],
     "extensions": [".py", ".pyw"]
   },
   "files": {
     "src/app.py": {
-      "meta": { "mtime_ns": 0, "size": 0 },
+      "sha256": "<64 hex chars of the raw file bytes>",
+      "module": "src_app_py.md",
       "parsed": { "filepath": "...", "language": "python", "classes": [] }
     }
   }
 }
 ```
 
+`parsed` is `null` for files that produced no result (for example, a file excluded by the language filter after reading). `module` is `null` in the same cases.
+
+**Reuse rules.** `cache_is_usable(payload, filter)` requires the cache `version`, `tool_version` (`repo_parser.__version__`) and `filter` to match the current run. Otherwise the whole cache is ignored. A per-file entry is reused only when its `sha256` matches the bytes just read. A malformed entry is treated as a miss, never as an error.
+
+**Bump `CACHE_VERSION`** when the layout changes. Changing parser or redaction behaviour needs a `tool_version` bump (see `pyproject.toml` and `repo_parser/__init__.py`, which must agree; `tests/unit/test_version.py` enforces it).
+
 **Public API:**
 
-| Method | Description |
+| Function | Description |
 |--------|-------------|
 | `cache_path(root)` | Returns `<root>/.rag_kb/parse_cache.json` |
+| `sha256_bytes(data)` | SHA-256 hex digest of raw bytes |
 | `build_filter_signature(languages, extensions)` | Produces deterministic cache filter metadata |
-| `load_cache(root)` | Loads JSON cache payload; returns `None` when missing/invalid |
-| `save_cache(root, payload)` | Writes cache payload to disk |
-| `file_signature(path)` | Returns stat signature (`mtime_ns`, `size`) for cache-hit checks |
+| `load_cache(root)` | Loads the JSON payload; returns `None` when missing, unreadable or not an object |
+| `cache_is_usable(payload, filter_signature)` | True when version, tool version and filter all match |
+| `save_cache(root, payload)` | Atomic write: temporary file in the same directory, then `os.replace` |
 | `parsed_file_to_dict(parsed)` / `parsed_file_from_dict(data)` | Dataclass ↔ dict conversion for cached parsed payloads |
 
-> `IndexCache` remains in `cache.py` for backward compatibility, but the active CLI path uses `load_cache` / `save_cache` and `parse_cache.json`.
+The legacy `IndexCache` class, `compute_hash` and `file_signature` were removed. Their mtime-based signature was replaced by the SHA-256 above.
+
+**Stale module cleanup** lives in `MarkdownGenerator.remove_stale_modules(keep)`. It deletes only generated files under `.rag_kb/modules/` whose first two lines are `---` and `filepath: …`, and whose name is not in `keep`.
 
 ---
 
@@ -477,22 +493,22 @@ Incremental caching is persisted to `.rag_kb/parse_cache.json`.
 Typer application with two commands: `init` and `bundle`.
 
 **`init` flow:**
-1. `setup_logging(verbose)` — configures file handler at `INFO` or `DEBUG`
+1. `setup_logging(verbose, log_target=…)` — `file` (default), `console` or `both`
 2. `RepositoryScanner(root, languages, extensions)` — initialise scanner
 3. `scanner.discover()` wrapped in `run_with_spinner` — shows spinner during discovery
-4. `load_cache(root)` — load incremental cache payload when `version` and `filter` match
+4. `load_cache(root)`; use it only when `--force` is off and `cache_is_usable(...)` holds
 5. Determine worker count via `--workers/-j` (`0` = auto `min(cpu_count, 8)`)
 6. `parsing_progress(total_steps)` context manager — shows progress bar
-7. `_parse_files(...)` — cache-aware parse pipeline; sequential for `workers=1`, `ThreadPoolExecutor` for `workers>1`
+7. `_parse_files(...)` — per file: `scanner.read_bytes` → `sha256_bytes` → reuse on match, else `_parse_source`; sequential for `workers=1`, `ThreadPoolExecutor` for `workers>1`
 8. `engine.infer_internal_dependencies(parsed_files)`
-9. `save_cache(root, payload)` with per-file `meta` + serialized `parsed`
-10. `MarkdownGenerator(root).generate(parsed_files)`
-11. Print summary and log path
+9. `MarkdownGenerator.kb_name_map`, `generate(parsed_files)`, then `remove_stale_modules(keep)`
+10. `save_cache(root, payload)` with per-file `sha256`, `module` and serialized `parsed`
+11. Print summary (modules, reused/parsed/stale counts, secrets) and the log path when there is one
 
 **`bundle` flow:**
-1. `setup_logging(verbose)`
-2. `bundle_knowledge_base(root, output_name)` wrapped in `run_with_spinner`
-3. `bundle_stats(bundle_path)` → print size/words/tokens/warning
+1. `setup_logging(verbose, log_target=…)`
+2. `bundle_knowledge_base(root, output, max_tokens, query, paths)` wrapped in `run_with_spinner`. It validates the output name and budget, reads the parse cache, filters by `--path`, ranks with `rank_files`, and selects within the budget with `select_blocks`.
+3. `bundle_stats(result.path)` → print budget, included/omitted counts, size/words/tokens/warning
 
 ---
 
@@ -533,16 +549,16 @@ CLI init(path, languages, workers, verbose)
   │     → .gitignore loaded via pathspec
   │     → discover() → sorted list[rel_path]
   │
-  ├── load_cache(root)
-  │     → parse_cache.json (version/filter/files)
+  ├── load_cache(root) + cache_is_usable(...)
+  │     → parse_cache.json (version/tool_version/filter/files)
   │
   ├── _parse_files(..., workers)
   │     → sequential (workers=1) or ThreadPoolExecutor (workers>1)
   │
   ├── For each rel_path:
-  │     content = scanner.read_file(rel_path)    # UTF-8 with error replace
-  │     → cache hit: parsed_file_from_dict(...)
-  │     → cache miss: engine.parse_file(...)
+  │     data = scanner.read_bytes(rel_path); digest = sha256_bytes(data)
+  │     → digest matches cache entry: parsed_file_from_dict(...)
+  │     → otherwise: engine.parse_file(decode_source(data))
   │
   ├── engine.infer_internal_dependencies(parsed_files)
   │     → populates ParsedFile.internal_dependencies
@@ -711,6 +727,8 @@ tests/
 │   ├── test_endpoints_security.py
 │   ├── test_markdown.py
 │   ├── test_bundle.py
+│   ├── test_context.py           ← ranking, query/path, budget selection (property tests)
+│   ├── test_version.py           ← package version matches pyproject.toml
 │   ├── test_detector.py
 │   ├── test_logging_config.py
 │   ├── test_query_api_spike.py
@@ -718,7 +736,7 @@ tests/
 │   ├── test_base_queries.py      ← tree-sitter node helpers
 │   ├── test_sql_queries.py       ← SQL/PL/SQL extraction
 │   ├── test_java_queries.py      ← Java fallback + tree-sitter parsers
-│   └── test_cache_extended.py    ← IndexCache lifecycle & serialisation
+│   └── test_cache_extended.py    ← parse cache reuse rules & serialisation
 └── integration/
     ├── test_cli.py
     ├── test_init_bundle.py
@@ -790,7 +808,7 @@ pytest --snapshot-update                  # regenerate snapshots
 1. **Fork** the repo and create a feature branch: `git checkout -b feat/my-feature`
 2. **Make your changes** — see the module reference above for where things live
 3. **Write or update tests** — every new code path needs a test
-4. **Run the full suite:** `pytest --cov=repo_parser --cov-fail-under=91`
+4. **Run the full suite:** `pytest --cov=repo_parser --cov-fail-under=80` (the CI floor; no published figure)
 5. **Run against a real repo:** `repo-parser init /some/project --verbose`
 6. **Commit with a clear message** following the convention:
    - `feat(module): short description` for new features

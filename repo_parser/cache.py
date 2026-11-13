@@ -1,40 +1,44 @@
-"""Persistence helpers for incremental repository indexing."""
+"""Parse cache stored at ``.rag_kb/parse_cache.json``.
+
+A file's cached result is reused when the SHA-256 of its raw bytes is unchanged.
+The whole cache is reused only when its layout version, the VegaParser version and
+the language filter all match. The cache also records which module documents the
+last run generated, so that stale ones can be removed exactly.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
+import tempfile
+import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
 
-from repo_parser.models import ClassInfo, DatabaseEndpoint, ExternalCall, ExternalUrl, FunctionInfo, ParsedFile
+from repo_parser import __version__ as TOOL_VERSION
+from repo_parser.models import (
+    ClassInfo,
+    DatabaseEndpoint,
+    ExternalCall,
+    ExternalUrl,
+    FunctionInfo,
+    ParsedFile,
+    SecretFinding,
+)
+
+logger = logging.getLogger(__name__)
 
 CACHE_FILENAME = "parse_cache.json"
-CACHE_VERSION = 1
-
-# ── dict ↔ dataclass converters ──────────────────────────────────────────────
-
-def _dict_to_parsed_file(data: dict) -> ParsedFile:
-    """Public alias for parsed_file_from_dict (kept for backward compatibility)."""
-    return parsed_file_from_dict(data)
+# Bump when the cache layout changes. Parser and redaction changes are covered by
+# TOOL_VERSION, which changes with every release.
+CACHE_VERSION = 3
 
 
-def _parsed_file_to_dict(parsed: ParsedFile) -> dict:
-    """Serialise a ParsedFile to a plain dict (used by tests and CLI)."""
-    return asdict(parsed)
-
-
-def compute_hash(content: str) -> str:
-    """Return a SHA-256 hex digest of *content*."""
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-
-# ── cache helpers ────────────────────────────────────────────────────────────
-
-def cache_path(root: Path) -> Path:
-    return root.resolve() / ".rag_kb" / CACHE_FILENAME
+def sha256_bytes(data: bytes) -> str:
+    """Return the SHA-256 hex digest of raw file bytes."""
+    return hashlib.sha256(data).hexdigest()
 
 
 def cache_path(root: Path) -> Path:
@@ -49,25 +53,62 @@ def build_filter_signature(languages: set[str] | None, extensions: set[str] | No
 
 
 def load_cache(root: Path) -> dict | None:
+    """Return the decoded cache, or None when it is missing or unreadable."""
     path = cache_path(root)
     if not path.is_file():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning("Parse cache is unreadable and will be rebuilt: %s", exc)
         return None
+    return payload if isinstance(payload, dict) else None
+
+
+def cache_is_usable(payload: dict | None, filter_signature: dict) -> bool:
+    """True when the cache layout, tool version and language filter all match this run."""
+    return (
+        payload is not None
+        and payload.get("version") == CACHE_VERSION
+        and payload.get("tool_version") == TOOL_VERSION
+        and payload.get("filter") == filter_signature
+        and isinstance(payload.get("files"), dict)
+    )
 
 
 def save_cache(root: Path, payload: dict) -> Path:
+    """Write the cache atomically: a temporary file in the same directory, then rename."""
     path = cache_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
+    body = json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=".parse_cache-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(body)
+        _replace_with_retry(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
     return path
 
 
-def file_signature(path: Path) -> dict[str, int]:
-    stat = path.stat()
-    return {"mtime_ns": stat.st_mtime_ns, "size": stat.st_size}
+_REPLACE_ATTEMPTS = 5
+
+
+def _replace_with_retry(src: str, dst: Path) -> None:
+    """``os.replace`` with a short retry. On Windows, a scanner or indexer that briefly holds
+    the old cache file makes the rename fail with PermissionError; the retry rides that out."""
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
+# ── ParsedFile ↔ dict converters ─────────────────────────────────────────────
 
 
 def parsed_file_to_dict(parsed: ParsedFile) -> dict:
@@ -135,173 +176,12 @@ def parsed_file_from_dict(data: dict) -> ParsedFile:
         external_urls=[_external_url_from_dict(item) for item in data.get("external_urls", [])],
         database_endpoints=[_database_endpoint_from_dict(item) for item in data.get("database_endpoints", [])],
         internal_dependencies=list(data.get("internal_dependencies", [])),
+        secret_findings=[
+            SecretFinding(category=item["category"], line=int(item.get("line", 0)))
+            for item in data.get("secret_findings", [])
+        ],
     )
 
 
-# ── IndexCache ───────────────────────────────────────────────────────────────
-
-class IndexCache:
-    """Incremental indexing cache backed by ``.rag_kb/.cache/manifest.json``.
-
-    Tracks known file paths and per-file content hashes so that files whose
-    content hasn't changed are skipped on subsequent runs.
-    """
-
-    MANIFEST_FILENAME = "manifest.json"
-
-    def __init__(self, rag_kb_dir: Path) -> None:
-        self.rag_kb_dir = rag_kb_dir.resolve()
-        self.manifest_path = self.rag_kb_dir / self.MANIFEST_FILENAME
-
-    def load(self) -> None:
-        """Load the manifest from disk."""
-        if not self.manifest_path.is_file():
-            return
-        try:
-            manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return
-        for rel_path, record in manifest.get("files", {}).items():
-            module_file = self._module_file_for(rel_path)
-            if module_file.exists() and record.get("content_hash") == record.get("content_hash"):
-                # cached parsed file may already exist
-                pass
-
-    def save(self) -> None:
-        """Persist the current manifest to disk."""
-        manifest: dict[str, Any] = {"files": {}}
-        for rel_str in self.known_paths():
-            module_file = self._module_file_for(rel_str)
-            manifest["files"][rel_str] = {
-                "content_hash": self._compute_hash_for(rel_str),
-                "parsed": _parsed_file_to_dict(self._load_parsed(rel_str)),
-            }
-        self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        self.manifest_path.write_text(
-            json.dumps(manifest, ensure_ascii=True, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-
-    def _compute_hash_for(self, rel_str: str) -> str:
-        """Compute SHA-256 hash of the source file at repo root."""
-        path = self.rag_kb_dir.parent / rel_str
-        try:
-            return hashlib.sha256(path.read_bytes()).hexdigest()
-        except OSError:
-            return ""
-
-    def _load_parsed(self, rel_str: str) -> ParsedFile:
-        """Load a ParsedFile from the module file in the cache."""
-        module_file = self._module_file_for(rel_str)
-        if not module_file.is_file():
-            return ParsedFile(
-                filepath=rel_str,
-                language="unknown",
-                module_docstring=None,
-                imports=[],
-                exports=[],
-                classes=[],
-                functions=[],
-                external_calls=[],
-                external_urls=[],
-                database_endpoints=[],
-                internal_dependencies=[],
-            )
-        return ParsedFile(
-            filepath=rel_str,
-            language="unknown",
-            module_docstring=None,
-            imports=[],
-            exports=[],
-            classes=[],
-            functions=[],
-            external_calls=[],
-            external_urls=[],
-            database_endpoints=[],
-            internal_dependencies=[],
-        )
-
-    def known_paths(self) -> set[str]:
-        """Return the set of file paths tracked by the cache."""
-        if not self.manifest_path.is_file():
-            return set()
-        try:
-            manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return set()
-        return set(manifest.get("files", {}).keys())
-
-    def remove(self, rel_path: str) -> None:
-        """Remove a tracked path from the cache."""
-        if not self.manifest_path.is_file():
-            return
-        try:
-            manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return
-        manifest["files"].pop(rel_path, None)
-        self.manifest_path.write_text(
-            json.dumps(manifest, ensure_ascii=True, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-
-    def is_cached(self, rel_path: str, content_hash: str, module_file: Path) -> bool:
-        """Return ``True`` if *rel_path* is in the cache and its content hash matches."""
-        if not self.manifest_path.is_file():
-            return False
-        try:
-            manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return False
-        record = manifest.get("files", {}).get(rel_path)
-        if not record:
-            return False
-        return record.get("content_hash") == content_hash
-
-    def get_cached_parsed_file(self, rel_path: str) -> ParsedFile | None:
-        """Return the cached ``ParsedFile`` for *rel_path*, or ``None``."""
-        if not self.manifest_path.is_file():
-            return None
-        try:
-            manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
-        record = manifest.get("files", {}).get(rel_path)
-        if not record:
-            return None
-        try:
-            return parsed_file_from_dict(record["parsed"])
-        except KeyError:
-            return None
-
-    def update(self, rel_path: str, content_hash: str, parsed_dict: dict) -> None:
-        """Record *rel_path* in the cache with *content_hash* and *parsed_dict*."""
-        if not self.manifest_path.is_file():
-            manifest = {"files": {}}
-        else:
-            try:
-                manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                manifest = {"files": {}}
-        manifest["files"][rel_path] = {
-            "content_hash": content_hash,
-            "parsed": parsed_dict,
-        }
-        self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        self.manifest_path.write_text(
-            json.dumps(manifest, ensure_ascii=True, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-
-    # ── helpers ────────────────────────────────────────────────────────────
-
-    def _module_file_for(self, rel_path: str) -> Path:
-        return self.rag_kb_dir / "modules" / sanitize_filename(rel_path)
-
-
-def sanitize_filename(name: str) -> str:
-    """Return a filesystem-safe filename derived from *name*."""
-    sanitized = "".join(c for c in name if c not in "/\\:*\\?" and ord(c) > 31)
-    if not sanitized:
-        sanitized = "unnamed"
-    return sanitized
+# Kept for the engine's cross-module import; new code should use parsed_file_from_dict.
+_dict_to_parsed_file = parsed_file_from_dict

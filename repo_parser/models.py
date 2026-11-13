@@ -57,6 +57,14 @@ class DatabaseEndpoint:
 
 
 @dataclass
+class SecretFinding:
+    """A likely secret detected in source. Holds the category and line only, never the value."""
+
+    category: str
+    line: int = 0
+
+
+@dataclass
 class ParsedFile:
     filepath: str
     language: str
@@ -69,3 +77,4 @@ class ParsedFile:
     external_urls: list[ExternalUrl] = field(default_factory=list)
     database_endpoints: list[DatabaseEndpoint] = field(default_factory=list)
     internal_dependencies: list[str] = field(default_factory=list)
+    secret_findings: list[SecretFinding] = field(default_factory=list)

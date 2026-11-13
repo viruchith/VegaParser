@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 
@@ -11,6 +12,12 @@ from repo_parser.cli import app
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
 runner = CliRunner()
+# Rich colors option names on a TTY, which splits "--log-target" with escape codes.
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _visible(text: str) -> str:
+    return _ANSI.sub("", text)
 
 
 def _copy_fixtures(tmp_path) -> Path:
@@ -19,7 +26,8 @@ def _copy_fixtures(tmp_path) -> Path:
     return dest
 
 
-def test_cli_init_generates_knowledge_base(tmp_path):
+def test_cli_init_generates_knowledge_base(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     repo = _copy_fixtures(tmp_path)
     result = runner.invoke(app, ["init", str(repo)])
     assert result.exit_code == 0, result.output
@@ -27,7 +35,8 @@ def test_cli_init_generates_knowledge_base(tmp_path):
     assert list((repo / ".rag_kb" / "modules").glob("*.md"))
 
 
-def test_cli_init_with_language_filter(tmp_path):
+def test_cli_init_with_language_filter(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     repo = _copy_fixtures(tmp_path)
     result = runner.invoke(app, ["init", str(repo), "--languages", "python"])
     assert result.exit_code == 0, result.output
@@ -36,7 +45,8 @@ def test_cli_init_with_language_filter(tmp_path):
     assert all(name.endswith("_py.md") for name in module_names)
 
 
-def test_cli_init_then_bundle(tmp_path):
+def test_cli_init_then_bundle(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     repo = _copy_fixtures(tmp_path)
     init_result = runner.invoke(app, ["init", str(repo), "--verbose"])
     assert init_result.exit_code == 0, init_result.output
@@ -51,3 +61,42 @@ def test_cli_bundle_without_init_fails(tmp_path):
     repo.mkdir()
     result = runner.invoke(app, ["bundle", str(repo)])
     assert result.exit_code == 1
+
+
+def test_cli_init_help_lists_cache_and_log_flags():
+    result = runner.invoke(app, ["init", "--help"])
+    assert result.exit_code == 0
+    help_text = _visible(result.output)
+    for flag in ("--force", "--no-cache", "--log-target"):
+        assert flag in help_text
+
+
+def test_cli_bundle_help_lists_log_target():
+    result = runner.invoke(app, ["bundle", "--help"])
+    assert result.exit_code == 0
+    assert "--log-target" in _visible(result.output)
+
+
+def test_cli_rejects_unknown_log_target(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    repo = _copy_fixtures(tmp_path)
+    result = runner.invoke(app, ["init", str(repo), "--log-target", "syslog"])
+    assert result.exit_code == 2
+    assert not (repo / ".rag_kb").exists()
+
+
+def test_cli_init_console_log_target_writes_no_log_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    repo = _copy_fixtures(tmp_path)
+    result = runner.invoke(app, ["init", str(repo), "--log-target", "console"])
+    assert result.exit_code == 0, result.output
+    assert not (tmp_path / "repo-parser.log").exists()
+
+
+def test_cli_bundle_console_log_target_writes_no_log_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    repo = _copy_fixtures(tmp_path)
+    assert runner.invoke(app, ["init", str(repo), "--log-target", "console"]).exit_code == 0
+    result = runner.invoke(app, ["bundle", str(repo), "--log-target", "console"])
+    assert result.exit_code == 0, result.output
+    assert not (tmp_path / "repo-parser.log").exists()

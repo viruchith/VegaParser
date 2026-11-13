@@ -3,11 +3,10 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![CI](https://github.com/viruchith/VegaParser/actions/workflows/ci.yml/badge.svg)](https://github.com/viruchith/VegaParser/actions/workflows/ci.yml)
-[![Coverage: 91%](https://img.shields.io/badge/coverage-91%25-brightgreen.svg)](#testing)
 
 **VegaParser** is a command-line tool that turns any local code repository into a structured **Markdown knowledge base** optimised for Large Language Models. It walks your source tree, parses every file with **Tree-sitter AST analysis**, enriches results with regex-based endpoint and secret extraction, and writes clean, YAML-frontmatted Markdown that can be injected directly into an LLM's context window.
 
-> **v0.2.0** — incremental caching, hardened secret redaction, 342-test suite (91 % coverage).
+> **v0.3.0** — context budgeting for `bundle`, secret redaction on every output, exact cache lifecycle, and scale validation. Breaking changes are listed in [CHANGELOG.md](CHANGELOG.md).
 > See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 
 ---
@@ -38,13 +37,13 @@
 
 | Feature | Details |
 |---------|---------|
-| **Tree-sitter AST parsing** | Semantic extraction — imports, classes, methods, docstrings, signatures — across 20+ languages |
+| **Tree-sitter AST parsing** | Semantic extraction — imports, classes, methods, docstrings, signatures. Measured for Python, TypeScript/JavaScript and Java; other languages are experimental or untested (see [Supported Languages](#supported-languages)) |
 | **RAG-optimised Markdown** | Per-module `.md` files with YAML frontmatter; ready for vector store ingestion or direct injection |
 | **Project-wide index** | `project_index.md` aggregates tech stack, dependency graph, all external URLs, and DB endpoints |
 | **LLM context bundle** | `bundle` command concatenates everything into a single `full_repo_context.md` with size/token estimates |
 | **Endpoint discovery** | Detects HTTP URLs, connection URIs, `.env` variables, JDBC strings, `create_engine()` calls, KV config |
-| **Secret redaction** | Passwords in connection strings are replaced with `***` before writing to any output file |
-| **Incremental caching** | SHA-256 manifest skips unchanged files on re-runs; stale module files are automatically removed |
+| **Secret redaction** | Likely secrets (URL passwords, query tokens, common key formats, credential assignments) are replaced with `***` before any output file is written |
+| **Incremental caching** | SHA-256 of each file's bytes; unchanged files reuse the cached parse on re-runs; modules for deleted or renamed sources are removed |
 | **Infrastructure-aware** | Dockerfile, Kubernetes manifests, Terraform/HCL, PL/SQL heuristics |
 | **Smart traversal** | Respects `.gitignore`, skips hidden dirs, `node_modules`, binaries, and the `.rag_kb/` output dir itself |
 | **Rich progress UI** | Spinner + progress bar; all logs written to `repo-parser.log`, never to stdout |
@@ -53,42 +52,32 @@
 
 ## How It Works
 
+`init` scans the tree, reuses cached parses, then writes the knowledge base. `bundle` is a separate command that reads that cache.
+
+```mermaid
+flowchart TD
+  root["Repository root"] --> scan["RepositoryScanner"]
+  scan --> files["Selected source files"]
+  files --> cache{"SHA-256 matches parse_cache.json?"}
+  cache -->|yes| reuse["Restore ParsedFile. Skip Tree-sitter"]
+  cache -->|no| parse["ParserEngine.parse_file"]
+  parse --> outcome{"Parse result"}
+  outcome -->|parsed| enrich["Extract URLs and DB endpoints. Redact secrets"]
+  outcome -->|supported language failed| fail["Record the path. Do not cache it"]
+  reuse --> infer["infer_internal_dependencies"]
+  enrich --> infer
+  infer --> write["MarkdownGenerator"]
+  write --> modules[".rag_kb/modules/*.md"]
+  write --> index[".rag_kb/project_index.md"]
+  write --> saved[".rag_kb/parse_cache.json"]
+  fail --> written["Knowledge base still written for the files that parsed"]
+  written --> exit2["init exits 2"]
+  index --> bundle["bundle, optional"]
+  modules --> bundle
+  bundle --> context[".rag_kb/full_repo_context.md"]
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│  Repository root                                                    │
-│                                                                     │
-│  RepositoryScanner                                                  │
-│    • loads .gitignore via pathspec                                  │
-│    • skips hidden dirs, binaries, .rag_kb/                          │
-│    • filters by --languages if supplied                             │
-│         │                                                           │
-│         ▼  list[Path]                                               │
-│  ParserEngine.parse_file(path, content)                             │
-│    • detects language via registry                                  │
-│    • dispatches to language-specific extractor                      │
-│    • runs enrich_parsed_file() — URL & DB regex scan                │
-│    • returns ParsedFile dataclass                                   │
-│         │                                                           │
-│         ▼  list[ParsedFile]                                         │
-│  IndexCache (incremental)                                           │
-│    • SHA-256 hash per file → .rag_kb/.cache/manifest.json           │
-│    • unchanged files: restore ParsedFile from cache, skip parse     │
-│         │                                                           │
-│         ▼                                                           │
-│  ParserEngine.infer_internal_dependencies()                         │
-│    • links imports to internal module paths                         │
-│         │                                                           │
-│         ▼                                                           │
-│  MarkdownGenerator.generate()                                       │
-│    • Jinja2: module.md.j2  → .rag_kb/modules/<name>.md             │
-│    • Jinja2: project_index.md.j2 → .rag_kb/project_index.md        │
-│         │                                                           │
-│         ▼  (optional)                                               │
-│  bundle_knowledge_base()                                            │
-│    • project_index.md first, then modules/ alphabetically           │
-│    • → .rag_kb/full_repo_context.md                                 │
-└─────────────────────────────────────────────────────────────────────┘
-```
+
+The scanner loads `.gitignore`, skips hidden directories, binaries, and `.rag_kb/`, and applies `--languages` when you set it. Parallel `init -j N` keeps at most `4 × N` parses in flight. `-j 1` and `-j 8` write the same bytes on the fixtures and the evaluation corpus.
 
 ---
 
@@ -101,6 +90,25 @@
 | **Database** | SQL, PL/SQL | `*.sql` `*.plsql` `*.pls` `*.pkb` `*.pks` |
 | **Config / Env** | Environment files, Properties, INI | `.env` `.env.*` `*.properties` `*.ini` `*.cfg` |
 | **Shell** | Bash, Makefile | `*.sh` `*.bash` `*.zsh` `Makefile` |
+
+### Language tiers
+
+The tier says how much evidence backs each language. Only **supported** languages have measured extraction accuracy.
+
+```mermaid
+flowchart LR
+  file["Source file"] --> tier{"Which evidence exists?"}
+  tier -->|measured corpus| supported["Supported: Python, TypeScript, JavaScript, Java"]
+  tier -->|fixture only| experimental["Experimental: parsed in tests, accuracy not measured"]
+  tier -->|extension and profile only| untested["Untested: C, C++, PHP, Kotlin, Scala, Swift"]
+```
+
+
+| Tier | Languages | Evidence |
+|------|-----------|----------|
+| **Supported** | Python, TypeScript/JavaScript, Java | Hand-labelled evaluation corpus (`tests/eval_corpus/`). Precision and recall are measured in [`docs/evaluation.md`](docs/evaluation.md). Also covered by the fixtures. |
+| **Experimental** | Go, Rust, C#, Ruby, Dockerfile, YAML / Kubernetes, SQL, PL/SQL, Terraform / HCL, Bash / Shell, env / properties / ini | A file is in the fixture set (`tests/fixtures/`) and parses in tests. Extraction accuracy is not measured. |
+| **Untested** | C, C++, PHP, Kotlin, Scala, Swift | Recognised by file extension and a generic parser profile. No fixture or extraction test in this repo. Expect gaps. |
 
 Language aliases accepted by `--languages`: `py`, `js`, `ts`, `golang`, `rs`, `k8s`, `kubernetes`, `docker`, `dockerfile`, `tf`, `terraform`, `shell`, `env`, `plsql`, …
 
@@ -154,6 +162,19 @@ repo-parser bundle /path/to/my-project
 cat /path/to/my-project/.rag_kb/full_repo_context.md | pbcopy   # macOS clipboard
 ```
 
+```mermaid
+sequenceDiagram
+  participant You
+  participant CLI as repo-parser
+  participant Repo as repository
+  You->>CLI: init PATH
+  CLI->>Repo: read source files
+  CLI->>Repo: write .rag_kb modules, project_index.md, parse_cache.json
+  You->>CLI: bundle PATH
+  CLI->>Repo: read parse_cache.json
+  CLI->>Repo: write .rag_kb/full_repo_context.md
+```
+
 ### Self-index VegaParser
 
 ```bash
@@ -182,6 +203,20 @@ Scans `PATH` (default: current directory), parses every supported source file, a
 | `--verbose` | `-v` | flag | off | Write DEBUG-level details to `repo-parser.log` |
 | `--log-target` | — | `file\\|console\\|both` | `file` | Choose where logs are written |
 | `--force` / `--no-cache` | — | flag | off | Bypass the incremental cache; reparse every file from scratch |
+| `--report-secrets` | — | flag | off | List likely secrets as category, file and line. Values are never printed. |
+| `--workers` | `-j` | int | `0` | Parallel parse workers. `0` = auto (min(CPU count, 8)); `1` = sequential. Tests confirm `-j 1` and `-j 8` write byte-identical output. |
+
+**Exit codes:** `0` on success. `2` when one or more files could not be parsed. The knowledge base is still written, the failed files are listed, and they are retried on the next run.
+
+```mermaid
+flowchart TD
+  run["init"] --> wrote["Write modules, project index, and cache"]
+  wrote --> any{"Any file unreadable or unparsed?"}
+  any -->|no| ok["Exit 0"]
+  any -->|yes| partial["List the failed paths. Exit 2"]
+  partial --> next["Next init retries those files. They were not cached"]
+```
+
 
 **Examples:**
 
@@ -199,13 +234,17 @@ repo-parser init . --force --verbose
 repo-parser init . -l py,go,docker,tf
 ```
 
-**Output on success:**
+**Output on success** (second run on an unchanged repo):
 
 ```
-Generated knowledge base with 42 modules (38 parsed, 4 from cache).
+Generated knowledge base with 20 modules.
+Parse cache: 20 reused, 0 parsed, 0 stale module(s) removed.
 Project index: /your/project/.rag_kb/project_index.md
+Likely secrets redacted: 3 in 2 file(s).
 Log file: /your/project/repo-parser.log
 ```
+
+The `Log file` line is omitted when `--log-target console` is used.
 
 ---
 
@@ -215,43 +254,77 @@ Log file: /your/project/repo-parser.log
 repo-parser bundle [PATH] [OPTIONS]
 ```
 
-Concatenates all files in `.rag_kb/` into a single `full_repo_context.md` ordered for LLM attention: `project_index.md` first, then module files alphabetically.
+Writes `.rag_kb/full_repo_context.md`: the project index first, then module files in **relevance order** (most relevant first). Ties break on path depth, then path, so the output is byte-identical for the same cache and arguments.
+
+**Budget.** The bound is always printed on every run (`Budget: unlimited` or `Budget: N tokens`), and the header of the bundle file states it too. `--max-tokens N` caps the bundle at N approximate tokens. The estimate is `ceil(characters / 3)`. This is a rough heuristic, not a tokenizer count. Modules are included whole. A module that does not fit is skipped, and smaller later modules may still fit. Omitted modules are listed at the end under `## Omitted by budget`. The project index is always included, so a budget smaller than the header and index is an error (exit 1) rather than an overrun.
+
+**Relevance.** Without `--query`, ranking uses entry points (`main.py`, `index.ts`, `Main.java`, ...), `main` functions, in-degree (how many internal files import a module, capped at 10), database or URL endpoints, and a penalty for test files. With `--query`, modules whose path, symbols, imports, exports or docstring mention a query term move up. Their direct internal dependencies get a one-hop boost. Matching is case-insensitive and camelCase in the query is split.
+
+```mermaid
+flowchart TD
+  cache["Read the current parse cache"] --> pathf{"--path set?"}
+  pathf -->|yes| keep["Keep modules whose path matches"]
+  pathf -->|no| allmods["Consider every module"]
+  keep --> rank["Rank. Query terms first, otherwise entry points, main, imports, endpoints. Tests rank lower"]
+  allmods --> rank
+  rank --> index["Always include the project index"]
+  index --> capped{"--max-tokens set?"}
+  capped -->|no| unlimited["Budget: unlimited. Include every ranked module"]
+  capped -->|yes| room{"Header and index fit the budget?"}
+  room -->|no| refuse["Exit 1. Budget too small"]
+  room -->|yes| pick["Add whole modules while they fit. List the rest under Omitted by budget"]
+  unlimited --> out["Write the bundle and print Budget, Modules, Size, Characters, Words, ~Tokens"]
+  pick --> out
+```
+
 
 | Argument / Option | Short | Type | Default | Description |
 |-------------------|-------|------|---------|-------------|
-| `PATH` | — | directory | `.` | Repository root (must contain `.rag_kb/`) |
-| `--output` | `-o` | string | `full_repo_context.md` | Output filename inside `.rag_kb/` |
+| `PATH` | — | directory | `.` | Repository root (must contain `.rag_kb/` and a current parse cache) |
+| `--output` | `-o` | string | `full_repo_context.md` | Plain `*.md` file name inside `.rag_kb/`. Paths and `project_index.md` are rejected (exit 1). |
+| `--max-tokens` | — | integer ≥ 1 | unlimited | Approximate token budget (characters / 3). Whole modules only. |
+| `--query` | `-q` | string | none | Rank modules that mention these terms first |
+| `--path` | — | gitignore-style glob, repeatable | all | Only consider modules whose repo-relative path matches. Multiple `--path` values are combined with OR. |
 | `--verbose` | `-v` | flag | off | Write DEBUG-level details to `repo-parser.log` |
 | `--log-target` | — | `file\\|console\\|both` | `file` | Choose where logs are written |
 
 **Examples:**
 
 ```bash
-# Default bundle
+# Whole knowledge base, no budget (prints "Budget: unlimited")
 repo-parser bundle
 
-# Custom output name
-repo-parser bundle -o context_for_gpt.md
+# At most ~8,000 approximate tokens, most relevant modules first
+repo-parser bundle --max-tokens 8000
 
-# Bundle a different project
-repo-parser bundle ~/projects/api-server
+# Focus on billing code and what it depends on
+repo-parser bundle --query invoice --max-tokens 8000
+
+# Only the Python packages under app/
+repo-parser bundle --path "app/**" --max-tokens 8000
+
+# Custom output name (must be a plain .md name)
+repo-parser bundle -o context_for_gpt.md
 ```
 
-**Output on success:**
+**Output on success** (fixtures, `init` already run):
 
 ```
 Bundle created successfully.
   Output:      /your/project/.rag_kb/full_repo_context.md
-  Size:        284.3 KB (291,145 bytes)
-  Characters:  291,059
-  Words:       42,318
-  ~Tokens:     72,764 (rough estimate, ~4 chars/token)
-  Log file:    /your/project/repo-parser.log
+  Budget:      2500 tokens (approximate: characters / 3)
+  Modules:     2 of 20 included, 18 omitted by budget
+  Size:        6.8 KB (6,996 bytes)
+  Characters:  6,794
+  Words:       1,150
+  ~Tokens:     2,265 (approximate: characters / 3)
 
 Warning: This file is intended for LLMs with large context windows.
 ```
 
-> **Tip:** Run `init` before `bundle`. `bundle` raises an error if `.rag_kb/` does not exist.
+With no budget the same repo gives `Budget: unlimited` and `Modules: 20 of 20 included`, which is 24,934 characters (about 8,312 approximate tokens). A `--max-tokens 1000` run fails with `too small`, because the header and index alone need about 1,788 approximate tokens for that repo.
+
+> **Tip:** Run `init` before `bundle`. `bundle` raises an error if `.rag_kb/` or its parse cache is missing or was written by another VegaParser version.
 
 ---
 
@@ -267,8 +340,7 @@ After `init`, the following tree is created inside your repository:
 │   ├── src_db_models_py.md
 │   ├── Dockerfile.md
 │   └── …
-├── .cache/
-│   └── manifest.json         ← incremental cache (SHA-256 hashes + serialised ParsedFile)
+├── parse_cache.json          ← incremental cache (SHA-256 per file + serialised ParsedFile)
 └── full_repo_context.md      ← created by `bundle`
 ```
 
@@ -337,22 +409,41 @@ Aggregates across all parsed files:
 
 ## Incremental Caching
 
-By default, `init` maintains a SHA-256 content-hash manifest at `.rag_kb/.cache/manifest.json`. On subsequent runs:
+`init` keeps one cache at `.rag_kb/parse_cache.json`. Each file entry stores the SHA-256 of the file's raw bytes, the module file it produced, and the serialised parse result. On subsequent runs:
+
+```mermaid
+flowchart TD
+  start["init"] --> skip{"--force, corrupt cache, or version or language filter differs?"}
+  skip -->|yes| all["Reparse every selected file"]
+  skip -->|no| each["For each file, compare SHA-256 of its bytes"]
+  each --> hit{"Hash matches the cache entry?"}
+  hit -->|yes| reuse["Restore that parse. Do not call Tree-sitter"]
+  hit -->|no| one["Parse that file and replace its entry"]
+  all --> cleanup["Remove generated modules whose source was deleted or renamed"]
+  reuse --> cleanup
+  one --> cleanup
+  cleanup --> save["Write parse_cache.json via a temp file, then rename"]
+```
+
 
 | File state | Action |
 |-----------|--------|
-| **Unchanged** (hash matches, module `.md` exists) | Restore `ParsedFile` from cache — Tree-sitter is not invoked |
-| **Changed** (hash mismatch) | Re-parse; update manifest entry |
-| **New** | Parse normally; add manifest entry |
-| **Deleted** (in manifest but not on disk) | Remove module `.md`; remove from manifest |
+| **Unchanged** (SHA-256 matches) | Restore the parse result from the cache — Tree-sitter is not invoked |
+| **Changed** (SHA-256 differs) | Re-parse; update the entry |
+| **New** | Parse; add an entry |
+| **Deleted or renamed** | Its module file is removed (see below) |
 
-The cache is transparent — output is byte-identical to a full parse. Use `--force`/`--no-cache` to bypass it:
+**Whole-cache invalidation.** The cache is ignored, and every file is reparsed, when any of these differ from the current run: the cache layout version, the VegaParser version, or the `--languages` filter. A corrupt or unreadable cache is also ignored and rebuilt. Writes are atomic (temporary file, then rename), so an interrupted run cannot leave a half-written cache.
+
+**Stale module cleanup.** Only files directly under `.rag_kb/modules/` whose first two lines are the generated header (`---` then `filepath:`) are candidates for removal, and only when no current source file maps to them. Files you add to `modules/` yourself are never touched. `project_index.md` and `full_repo_context.md` are always rewritten, never deleted.
+
+**Bypassing the cache.** `--force` (alias `--no-cache`) reparses every file and rewrites the cache:
 
 ```bash
-repo-parser init --force          # full reparse, then update cache
+repo-parser init --force          # full reparse, then rewrite the cache
 ```
 
-On a warm cache, re-running `init` on an unchanged `tests/fixtures/` produces **zero `parse_file` calls** — only project index regeneration occurs.
+On a warm cache, re-running `init` on an unchanged `tests/fixtures/` parses **zero files**. The output reports `0 parsed`. A warm run writes the same bytes as a `--force` run; `test_warm_cache_output_matches_full_reparse` checks this. The lifecycle tests in `tests/integration/test_incremental_indexing.py` count `ParserEngine.parse_file` calls to show which files were reparsed.
 
 ---
 
@@ -369,7 +460,22 @@ After Tree-sitter parsing, every file is scanned by `endpoints.py` regardless of
 | Env var assignments | `DATABASE_URL`, `PGHOST`, `REDIS_URL`, `SPRING_DATASOURCE_URL`, … |
 | KV config lines | `host = db.internal`, `port: 5432`, `"database": "myapp"` |
 
-**Passwords are always redacted** to `***` in all output. Known limitations (multi-line concatenations, f-string interpolation) are documented in `DESIGN.md → Endpoint Extraction → Known Limitations`.
+**Likely secrets are always redacted** to `***` in every output. This covers URL passwords (including passwords that contain `@`), query tokens, common key formats (AWS, GitHub, Slack, Google, Stripe, JWT, PEM headers) and `password`/`secret`/`token`/`api_key` assignments. Placeholders such as `changeme` are kept. Redaction cannot be turned off.
+
+```mermaid
+flowchart LR
+  source["Source text"] --> rules["redaction.py"]
+  rules --> modules["Module docs"]
+  rules --> index["Project index"]
+  rules --> cache["Parse cache"]
+  rules --> bundle["Bundle"]
+  rules --> logs["Logs"]
+```
+
+
+`init` prints how many likely secrets it redacted. Add `--report-secrets` to list each one by category, file and line. Values are never printed.
+
+The full category list and known limitations are in `DESIGN.md → Secret redaction`.
 
 ---
 
@@ -412,13 +518,13 @@ VegaParser/
 ├── docs/
 │   └── tree-sitter-query-api-evaluation.md
 ├── tests/
-│   ├── fixtures/                   ← sample corpus (17 files, 11 languages)
+│   ├── fixtures/                   ← sample corpus (21 files)
 │   ├── unit/                       ← one test module per source module (17 modules)
 │   └── integration/                ← end-to-end init + bundle + cache tests
 └── repo_parser/
     ├── cli.py                      ← Typer app: init, bundle
     ├── models.py                   ← ParsedFile, ClassInfo, FunctionInfo, …
-    ├── cache.py                    ← IndexCache (incremental manifest)
+    ├── cache.py                    ← parse cache (versioned, SHA-256 per file)
     ├── traversal/
     │   └── scanner.py              ← RepositoryScanner
     ├── parser/
@@ -545,6 +651,7 @@ python scripts/benchmark_vegaparser.py \
 | `--refresh` | Re-clone repositories before benchmarking |
 | `--workspace <path>` | Custom clone/cache directory (default: `~/.cache/vegaparser-benchmarks`) |
 | `--json <file>` | Export full results as JSON |
+| `--local <path>` (repeatable) | Benchmark a local directory. It is copied into the workspace (`.git`, `.venv`, `node_modules`, `.rag_kb` are skipped) and never modified. With `--local` alone, only local paths run |
 | `--verbose` | Print detailed step-by-step progress logs during clone and runs |
 | `--workers <n>` | Run up to `n` targets in parallel (default: `1`) |
 | `--max-heavy-workers <n>` | Cap concurrent `heavy` targets when running in parallel (default: `2`) |
@@ -582,9 +689,9 @@ cannot delete each other's `.rag_kb` state during parallel runs.
 ### Cold vs warm runs
 
 VegaParser has a file-level incremental cache (`parse_cache.json` inside `.rag_kb/`).
-Each cache entry stores the file's `mtime_ns` and `size`.
-On re-index, if those values match, the tree-sitter parse step is skipped entirely and
-the cached `ParsedFile` record is reused — only markdown generation runs.
+Each cache entry stores the SHA-256 of the file's bytes.
+On re-index, if the hash matches, the tree-sitter parse step is skipped and the
+cached `ParsedFile` record is reused — only markdown generation runs.
 
 The benchmark exploits this to measure two distinct performance profiles:
 
@@ -592,6 +699,7 @@ The benchmark exploits this to measure two distinct performance profiles:
 |---|---|---|---|
 | **Cold** | `.rag_kb` deleted before every run | No | Full parse: file I/O + tree-sitter + markdown write |
 | **Warm** | `.rag_kb` kept from the cold run | Yes (all cache hits) | Incremental reindex: cache load + markdown write only |
+
 
 **Enabling a warm pass:**
 
@@ -608,10 +716,9 @@ python scripts/benchmark_vegaparser.py \
 ```
 
 **What to expect:**
-On an unchanged repo (the benchmark case), warm times are dramatically lower than cold.
-For example, a `kotlin-heavy` cold run of ~50 s typically drops to ~2–5 s warm, because
-all 67 000+ modules are cache hits and tree-sitter is never invoked.
-The `warm_s` column in the result table and JSON captures this timing.
+On an unchanged repo (the benchmark case), a warm run skips tree-sitter for every file.
+This README does not publish timings: the numbers for a given repo come from running the
+benchmark on that repo. The `warm_s` column in the result table and JSON captures them.
 
 > **Note:** `warm_s` is `null` / `-` when `--warm` is not passed.
 
@@ -621,7 +728,39 @@ The `warm_s` column in the result table and JSON captures this timing.
 - `cold_min_s` / `cold_max_s`: spread across cold runs (only meaningful when `--repeat` > 1)
 - `warm_s`: warm-cache timing (`--warm`) — `null` when not requested
 - `modules`: number of module markdown files generated
-- `status`: `ok`, `clone failed: …`, `cold run failed`, `warm run failed`, `interrupted` (Ctrl+C mid-run), `cancelled` (never started after Ctrl+C), or `exit <rc>`
+- `peak_mb`: peak memory in MB (see [Measurement method](#measurement-method))
+- `out_kb`: total size in KB of everything written under `.rag_kb/` after the last run
+- `status`: `ok`, `empty output (no modules or no project index)`, `clone failed: …`, `cold run failed`, `warm run failed`, `interrupted` (Ctrl+C mid-run), `cancelled` (never started after Ctrl+C), or `exit <rc>`
+
+A target is `ok` only when `init` exits `0` **and** writes at least one module **and** `project_index.md`. A run that exits `0` with empty output is recorded as a failure. The script exits `1` when any target is not `ok`.
+
+### Measured results
+
+These numbers come from this Windows PC (2026-11-12, Python 3.14 in the project venv). They are single cold runs (`--repeat 1`), with no control over background load, so treat them as indicative only.
+
+| id | source | cold_avg_s | peak_mb | out_kb | modules |
+|---|---|---|---|---|---|
+| local-fixtures | `tests/fixtures` (`--local`) | 1.90 | 49.0 | 68.7 | 20 |
+| local-VegaParser | this repo, `.venv` excluded (`--local .`) | 3.87 | 53.1 | 812.9 | 121 |
+| python-light | psf/requests | 3.46 | 51.9 | 718.3 | 37 |
+| javascript-light | preactjs/preact | 14.65 | 59.0 | 2944.1 | 207 |
+| java-heavy | google/gson | 15.25 | 58.0 | 3616.1 | 266 |
+| python-heavy | pandas-dev/pandas | 99.79 | 153.3 | 27601.0 | 1551 |
+
+Not measured yet: the full 42-target suite, warm runs at scale, macOS and Linux memory, and `init -j N` timing against `-j 1`.
+
+### Measurement method
+
+- `peak_mb` is sampled about every 0.1 s while the child process runs. Peaks shorter than that can be missed, so the value can be low.
+- On Windows the venv's `python.exe` is a launcher that starts the real interpreter as a child. The script sums the peak working set over the whole process tree, which can overstate the true simultaneous peak. The launcher itself is about 5 MB.
+- On Linux the value is the kernel's `VmHWM` peak. On other POSIX systems it is the maximum of sampled `ps` RSS values.
+
+### Scale and limits
+
+- `init` parses files in a bounded thread pool: at most `4 × workers` tasks are in flight, so memory does not grow with the number of files waiting in the queue.
+- Parsers are kept per thread. A test runs 8 threads over one shared `ParserEngine` and checks the results match a sequential run. This is evidence, not a proof of thread safety for the tree-sitter library.
+- A file that cannot be parsed makes `init` exit `2`. The knowledge base is still written, the file is listed, and it is not cached, so the next run retries it.
+- Parallel and sequential `init` produce byte-identical output on the fixtures and the eval corpus (tested with `-j 1` against `-j 8`).
 - `artifact_rag_kb`: target-specific snapshot path to generated `.rag_kb` (when present)
 - `artifact_log`: target-specific snapshot path to `repo-parser.log` (when present)
 
@@ -663,13 +802,13 @@ pytest tests/unit/test_endpoints_security.py -v
 pytest tests/integration/ -v
 ```
 
-Current status: **342 tests · 91 % coverage** on `repo_parser/`.
-
 The CI pipeline (`.github/workflows/ci.yml`) runs on every push and pull request against `main` across Python 3.10, 3.11, and 3.12. It includes three jobs:
 
 - **build** — builds the sdist + wheel and verifies `repo-parser --help` works from the installed wheel
-- **test** — runs the full pytest suite with coverage on all three Python versions; fails if coverage drops below 91 %
+- **test** — runs the full pytest suite with coverage on all three Python versions; CI enforces a coverage floor of 80 % (`--cov-fail-under=80`)
 - **coverage** — generates and uploads an HTML coverage report artifact (Python 3.12 only)
+
+No coverage percentage is published here. Run `pytest --cov=repo_parser --cov-report=term-missing` to measure it locally.
 
 ---
 

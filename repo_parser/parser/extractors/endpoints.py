@@ -6,6 +6,7 @@ import re
 from urllib.parse import urlparse
 
 from repo_parser.models import DatabaseEndpoint, ExternalUrl, ParsedFile
+from repo_parser.redaction import redact_text
 
 # HTTP(S), WebSocket, FTP URLs — exclude common false positives
 URL_PATTERN = re.compile(
@@ -93,23 +94,20 @@ SKIP_URL_HOSTS = frozenset({"localhost", "127.0.0.1", "0.0.0.0"})
 
 
 def redact_secrets(value: str) -> str:
-    """Redact passwords in connection strings while preserving host/user/db."""
-    # Handle ``://user:pass@`` (with username)
-    value = re.sub(r"://([^:@]+:)([^@/]+)@", r"://\1***@", value)
-    # Handle ``://:pass@`` (empty username, e.g. redis://:pass@host)
-    value = re.sub(r"://:([^@/]+)@", r"://:***@", value)
-    value = re.sub(
-        r"(?i)(password|passwd|pwd|secret|token)\s*[=:]\s*['\"]?[^'\"#\s,]+",
-        r"\1=***",
-        value,
-    )
-    return value
+    """Redact likely secrets in *value* while preserving host, user and database names."""
+    return redact_text(value)
+
+
+def _context(line: str) -> str:
+    """Return a 160-character snippet. The line is redacted before truncation so a
+    credential that straddles the cut-off cannot leak its tail."""
+    return redact_text(line.strip())[:160]
 
 
 def _line_context(source: str, line_no: int) -> str:
     lines = source.splitlines()
     if 1 <= line_no <= len(lines):
-        return lines[line_no - 1].strip()[:160]
+        return _context(lines[line_no - 1])
     return ""
 
 
@@ -192,7 +190,7 @@ def _collect_kv_from_line(line: str, line_no: int, skip_if_uri: bool = False) ->
         schema=fields.get("schema"),
         database=fields.get("database"),
         line=line_no,
-        context=line.strip()[:160],
+        context=_context(line),
         raw_redacted=redact_secrets(line.strip()),
     )
 
@@ -207,7 +205,7 @@ def extract_endpoints(source: str) -> tuple[list[ExternalUrl], list[DatabaseEndp
     lines = source.splitlines()
 
     for line_no, line in enumerate(lines, 1):
-        context = line.strip()[:160]
+        context = _context(line)
         stripped = line.strip()
         has_conn_signal = "://" in line or "=" in line or ":" in line or "{" in line or "}" in line
 

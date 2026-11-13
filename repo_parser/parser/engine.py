@@ -8,11 +8,13 @@ from dataclasses import asdict
 import logging
 from threading import local
 
-from tree_sitter_language_pack import get_parser, has_language
+from tree_sitter import Parser
+from tree_sitter_language_pack import get_language, has_language
 
 from repo_parser.cache import _dict_to_parsed_file
 from repo_parser.models import ParsedFile
 from repo_parser.parser.ts_compat import ParserAdapter
+from repo_parser.redaction import redact_parsed_file, scan_source
 from repo_parser.parser.dependencies import infer_internal_dependencies as infer_file_dependencies
 from repo_parser.parser.extractors.endpoints import enrich_parsed_file
 from repo_parser.parser.queries.common_queries import PROFILES, parse_common
@@ -50,6 +52,16 @@ def _grammar_for_language(lang_name: str) -> str:
     return lang_name
 
 
+def _new_parser(grammar: str) -> Parser:
+    """Build a new parser for this grammar.
+
+    ``get_parser()`` from tree-sitter-language-pack can hand back one shared
+    parser. That is unsafe: a tree-sitter parser must not be used from two
+    threads at once. Callers cache the result per thread.
+    """
+    return Parser(get_language(grammar))
+
+
 def _get_ts_parser(grammar: str) -> ParserAdapter:
     """Return a thread-local cached ParserAdapter for *grammar*.
 
@@ -61,11 +73,11 @@ def _get_ts_parser(grammar: str) -> ParserAdapter:
     if cache is None:
         cache = {}
         _parser_tls.parsers = cache
-    p = cache.get(grammar)
-    if p is None:
-        p = ParserAdapter(get_parser(grammar))
-        cache[grammar] = p
-    return p
+    adapter = cache.get(grammar)
+    if adapter is None:
+        adapter = ParserAdapter(_new_parser(grammar))
+        cache[grammar] = adapter
+    return adapter
 
 
 def _parse_file_isolated(filepath: str, source: str, lang_name: str) -> ParsedFile | None:
@@ -124,36 +136,27 @@ for _lang in PROFILES:
 class ParserEngine:
     """Parse source files using tree-sitter."""
 
-    def __init__(self) -> None:
-        self._thread_local = local()
-
     def _get_parser(self, lang_name: str):
-        cache = getattr(self._thread_local, "parser_cache", None)
-        if cache is None:
-            cache = {}
-            self._thread_local.parser_cache = cache
-
-        if lang_name not in cache:
-            grammar = lang_name
-            if lang_name == "kubernetes":
-                grammar = "yaml"
-            elif lang_name == "plsql":
-                grammar = "sql"
-            elif lang_name == "shell":
-                grammar = "bash"
-            elif lang_name == "csharp":
-                grammar = "csharp"
-            if not has_language(grammar):
-                logger.warning("Tree-sitter grammar not available for: %s", grammar)
-                return None
-            try:
-                cache[lang_name] = get_parser(grammar)
-            except Exception as exc:
-                logger.warning("Could not load tree-sitter parser for %s: %s", grammar, exc)
-                return None
-        return cache[lang_name]
+        """The tree-sitter parser for this thread. Reused for later files, never shared."""
+        grammar = _grammar_for_language(lang_name)
+        if not has_language(grammar):
+            logger.warning("Tree-sitter grammar not available for: %s", grammar)
+            return None
+        try:
+            return _get_ts_parser(grammar)._parser
+        except Exception as exc:
+            logger.warning("Could not load tree-sitter parser for %s: %s", grammar, exc)
+            return None
 
     def parse_file(self, filepath: str, source: str) -> ParsedFile | None:
+        """Parse one file and redact it. Every output surface receives redacted data only."""
+        result = self._parse_file_unredacted(filepath, source)
+        if result is not None:
+            result.secret_findings = scan_source(source)
+            redact_parsed_file(result)
+        return result
+
+    def _parse_file_unredacted(self, filepath: str, source: str) -> ParsedFile | None:
         lang_name = detect_language(filepath)
         if lang_name is None:
             return None
@@ -167,40 +170,34 @@ class ParserEngine:
         if lang_name in ("env", "properties", "ini", "java", "sql", "plsql"):
             try:
                 result = parser_fn(filepath, source, None)
-                return result
             except Exception as exc:
                 logger.error("Failed to parse config file %s: %s", filepath, exc)
                 return None
+            # env/properties/ini enrich inside parse_env; the others need it here.
+            if lang_name in ("java", "sql", "plsql"):
+                try:
+                    enrich_parsed_file(result, source)
+                except Exception as exc:
+                    logger.error("Failed to enrich %s: %s", filepath, exc)
+            return result
 
         result = _parse_file_isolated(filepath, source, lang_name)
         if result is None:
             logger.warning("No parse result for %s (%s)", filepath, lang_name)
         return result
 
-    def infer_internal_dependencies(self, parsed_files: list[ParsedFile]) -> None:
-        """Link import statements to internal module paths where possible."""
-        module_paths = {pf.filepath for pf in parsed_files}
-        stem_map: dict[str, str] = {}
-        for path in module_paths:
-            from pathlib import Path
+    def infer_internal_dependencies(
+        self,
+        parsed_files: list[ParsedFile],
+        sources: dict[str, str] | None = None,
+    ) -> None:
+        """Link import statements to internal module paths.
 
-            p = Path(path)
-            stem_map[p.stem] = path
-            if p.suffix:
-                stem_map[p.stem + p.suffix.replace(".", "_")] = path
-
-        for pf in parsed_files:
-            deps: set[str] = set()
-            for imp in pf.imports:
-                for token in imp.replace(",", " ").split():
-                    token = token.strip().strip("'\"")
-                    if token.startswith("."):
-                        resolved = self._resolve_relative(pf.filepath, token)
-                        if resolved and resolved in module_paths:
-                            deps.add(resolved)
-                    elif token in stem_map:
-                        deps.add(stem_map[token])
-            pf.internal_dependencies = sorted(deps)
+        Delegates to the multi-language resolver in ``repo_parser.parser.dependencies``,
+        the single resolver used by ``init`` and by the evaluation script.
+        ``sources`` maps repo-relative path to text; it is needed for Java package names.
+        """
+        infer_file_dependencies(parsed_files, sources)
 
     @staticmethod
     def _resolve_relative(from_path: str, import_path: str) -> str | None:

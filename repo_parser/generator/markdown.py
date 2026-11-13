@@ -11,6 +11,7 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from repo_parser.models import ParsedFile
+from repo_parser.redaction import redact_text
 from repo_parser.stack.detector import detect_stack
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,17 @@ def _with_hash_suffix(stem: str, filepath: str) -> str:
     return f"{base}__{digest}.md"
 
 
+def _is_generated_module(path: Path) -> bool:
+    """True when the file starts with the generated module header."""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            first = handle.readline()
+            second = handle.readline()
+    except OSError:
+        return False
+    return first.rstrip("\r\n") == "---" and second.startswith("filepath: ")
+
+
 class MarkdownGenerator:
     """Write .rag_kb module files and project index."""
 
@@ -63,7 +75,7 @@ class MarkdownGenerator:
 
         module_template = self.env.get_template("module.md.j2")
         index_template = self.env.get_template("project_index.md.j2")
-        kb_name_map = self._build_kb_name_map(parsed_files)
+        kb_name_map = self.kb_name_map(parsed_files)
 
         for pf in parsed_files:
             kb_name = kb_name_map[pf.filepath]
@@ -88,7 +100,25 @@ class MarkdownGenerator:
         logger.info("Knowledge base written to %s", self.output_dir)
         return index_path
 
-    def _build_kb_name_map(self, parsed_files: list[ParsedFile]) -> dict[str, str]:
+    def remove_stale_modules(self, keep: set[str]) -> list[str]:
+        """Delete generated module files that no current source file maps to.
+
+        Only files directly under ``.rag_kb/modules/`` whose first two lines match the
+        generated header (``---`` then ``filepath:``) are candidates. Anything else,
+        including files a user placed there, is left alone. Returns removed names.
+        """
+        if not self.modules_dir.is_dir():
+            return []
+        removed: list[str] = []
+        for path in sorted(self.modules_dir.glob("*.md")):
+            if path.name in keep or not _is_generated_module(path):
+                continue
+            path.unlink()
+            removed.append(path.name)
+            logger.info("Removed stale module %s", path.name)
+        return removed
+
+    def kb_name_map(self, parsed_files: list[ParsedFile]) -> dict[str, str]:
         """Return filepath -> unique markdown filename mapping."""
         kb_name_map: dict[str, str] = {}
         used_names: set[str] = set()
@@ -128,7 +158,8 @@ class MarkdownGenerator:
                 }
             )
 
-        stack = detect_stack(self.root)
+        # Manifest lines such as `pkg @ https://user:token@host/...` can carry credentials.
+        stack = {key: [redact_text(item) for item in items] for key, items in detect_stack(self.root).items()}
         project_name = self.root.name
 
         all_urls = []

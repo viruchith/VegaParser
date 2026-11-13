@@ -44,7 +44,8 @@ vegaparser/
     ├── generator/
     │   ├── __init__.py
     │   ├── markdown.py             # Jinja2 render + file naming
-    │   ├── bundle.py               # Concatenate .rag_kb → full_repo_context.md
+    │   ├── bundle.py               # Concatenate .rag_kb → full_repo_context.md (budget, output checks)
+    │   ├── context.py              # Pure ranking (entry points, in-degree, --query) and budget selection
     │   └── templates/
     │       ├── module.md.j2
     │       └── project_index.md.j2
@@ -82,9 +83,12 @@ CLI bundle [PATH]
 - **In-memory aggregation:** `list[ParsedFile]` collected during traversal; passed to generator at end.
 - **Output:** `.rag_kb/modules/<sanitized_path>.md` + `.rag_kb/project_index.md`
 - **Incremental cache:** A per-repo payload at `.rag_kb/parse_cache.json` stores
-  `version`, `filter`, and `files`. Each file entry contains a cheap stat signature
-  (`mtime_ns`, `size`) plus serialized `ParsedFile` data. On subsequent `init` runs,
-  unchanged files are restored from cache instead of being re-parsed.
+  `version`, `tool_version`, `filter`, and `files`. Each file entry contains the SHA-256 of
+  the file's raw bytes, the module file it produced, and the serialized `ParsedFile`. On
+  subsequent `init` runs, a file whose hash matches is restored from cache instead of being
+  re-parsed. The whole cache is ignored when the layout version, tool version or language
+  filter differ. Writes are atomic. Modules for deleted or renamed sources are removed; only
+  files carrying the generated header are candidates.
 
 ## File Traversal Strategy
 
@@ -119,6 +123,16 @@ See `repo_parser/parser/registry.py` for the full mapping. Highlights:
 | `.sql`, `.plsql` | sql (→ plsql via heuristics) |
 | `.sh`, `.bash` | bash |
 | `.env`, `.properties`, `.ini` | env / properties / ini |
+
+### Language tiers
+
+| Tier | Languages | Evidence |
+|------|-----------|----------|
+| Supported | Python, TypeScript/JavaScript, Java | Measured in `docs/evaluation.md` against the hand-labelled corpus in `tests/eval_corpus/` |
+| Experimental | Go, Rust, C#, Ruby, Dockerfile, YAML / Kubernetes, SQL, PL/SQL, Terraform / HCL, Bash / Shell, env / properties / ini | Present in `tests/fixtures/` and parsed in tests. Accuracy not measured |
+| Untested | C, C++, PHP, Kotlin, Scala, Swift | Extension mapping and a generic profile only. No fixture or extraction test |
+
+Only supported languages have measured extraction accuracy. Dependency resolution for the other tiers is not measured.
 
 ## Tree-sitter Parsing Strategy
 
@@ -165,13 +179,43 @@ Runs on **all** parsed files after tree-sitter extraction. Regex-based, language
 5. **Dict literals** — `"host": "value"` in Python/JSON
 6. **Driver strings** — `create_engine("…")`
 
-Passwords are redacted in output (`***`).
+### Secret redaction (`repo_parser/redaction.py`)
+
+Redaction runs once per parsed file in `ParserEngine.parse_file`, after endpoint extraction. Every string in the resulting `ParsedFile` is rewritten before it reaches the cache, the module docs, the project index, the bundle or the log. Stack detection output (`requirements.txt`, `package.json`, …) is redacted the same way before the index is rendered. Redaction is always on; there is no opt-out.
+
+Only values are removed. Host, port, user and database names are kept.
+
+| Category | What is matched | Example output |
+|----------|-----------------|----------------|
+| `url-credentials` | `scheme://user:password@host`; the password may contain `@` (matched up to the last `@` before `/`) | `postgresql://app:***@db:5432/orders` |
+| `url-query-secret` | query parameters `key`, `token`, `secret`, `password`, `passwd`, `pwd`, `sig`, `api_key`, `apikey`, `access_token`, `access_key`, `client_secret` | `?api_key=***` |
+| `aws-access-key` | `AKIA…` / `ASIA…` + 16 characters | `***` |
+| `github-token` | `gh[pousr]_` + 36 or more characters | `***` |
+| `slack-token` | `xox[baprs]-…` | `***` |
+| `google-api-key` | `AIza` + 35 characters | `***` |
+| `stripe-live-key` | `sk_live_…`, `rk_live_…` | `***` |
+| `jwt` | three base64url segments, the first two starting `eyJ` | `***` |
+| `private-key` | PEM `BEGIN … PRIVATE KEY` header line | `***` |
+| `credential-assignment` | `password`, `passwd`, `pwd`, `secret`, `token`, `api_key`, `access_key`, `client_secret` assigned a value of 8+ characters (quoted or bare) | `password=***` |
+
+**Not redacted (placeholders and code references):** `changeme…`, `your-…`, `example…`, `placeholder…`, `dummy…`, `redacted…`, runs of `x` or `*`, `none`, `null`, `true`, `false`, `${VAR}`, `<value>`, `os.environ.get(…)`, and dotted references such as `self.default_password`.
+
+**Context snippets** (the 160-character `context` field) are redacted before they are truncated, so a credential that straddles the cut-off does not leak its tail.
+
+**Reporting.** `init` always prints the number of redacted findings and files. `init --report-secrets` also lists each finding as category, file and line. The report never contains values. Findings come from scanning the source of every parsed file, so a secret in plain code is reported even when it never reaches the output. The findings are stored with each parsed file, so cache hits report them too.
+
+**Logging.** A logging filter applies the same rules to every log message and traceback, as a second line of defence.
 
 ### Known Limitations
 1. **Multi-line credentials**: Connection strings split across string concatenation are not detected or redacted.
 2. **F-string interpolation**: `f"postgres://{user}:{password}@host"` will not have credentials redacted.
 3. **Commented-out lines**: Lines starting with `#` are NOT excluded from extraction (deliberate).
 4. **False positives**: Variables with names containing `host`, `port`, etc. as substrings are not guaranteed to be excluded by all patterns.
+5. **Multi-line key bodies**: Only the PEM header line is matched. Base64 key bodies are not.
+6. **Passwords containing `/`**: URL userinfo cannot contain `/`. URL-encode such passwords or they are not matched.
+7. **Bare values**: A secret with no key name and no known format (for example a random string on its own line) is not detected.
+8. **File paths**: Path names are not scanned. A secret in a file name is not redacted.
+9. **Skipped files**: Files excluded by size, language filter, or parse failure produce no findings and no output.
 
 ## Markdown Generation
 
@@ -202,11 +246,15 @@ repo-parser bundle [PATH] [OPTIONS]
 
 ### `bundle` command
 
-- Requires an existing `.rag_kb/` directory (run `init` first)
-- Order: `project_index.md` → `modules/*.md` (alphabetical)
+- Requires an existing `.rag_kb/` and a current parse cache (run `init` first)
+- Order: `project_index.md` → `modules/*.md` in relevance order (ties by depth, then path). Output is deterministic.
+- `--max-tokens N` caps the bundle at N approximate tokens (characters / 3). Whole modules only. Omitted modules are listed at the end. The project index is always included, so a budget below the header and index is an error.
+- `--query` and `--path` change which modules rank first or are considered. Both are reflected in the bundle header.
+- `--output` must be a plain `*.md` name inside `.rag_kb/`.
+- The bound is printed on every run (`Budget: unlimited` or `Budget: N tokens`).
 - Delimiter before each module file; frontmatter preserved
-- Prints size (KB/MB), character/word counts, ~token estimate, and context-window warning
-- Raises a clear error if `.rag_kb/` is missing or empty
+- Prints the budget, included and omitted module counts, size, character/word counts, the approximate token estimate, and a context-window warning
+- Raises a clear error if `.rag_kb/` or its cache is missing, or if the output name or budget is invalid
 
 ### Logging
 
@@ -226,10 +274,15 @@ repo-parser bundle [PATH] [OPTIONS]
   - `.rag_kb/`
   - `repo-parser.log`
 - JSON output includes `artifact_rag_kb` and `artifact_log` paths for quality audits
+- `--local PATH` benchmarks a local directory. It is copied into the workspace (never modified).
+- Each row records `peak_rss_bytes` (sampled peak memory; Windows sums the venv launcher's process tree) and `output_bytes` (size of `.rag_kb/`).
+- A run is `ok` only with modules and `project_index.md` present. Otherwise the status is `empty output`, and the script exits `1`.
 
 ## Error Handling
 
-- Unparseable files: log warning, skip (don't fail entire run)
+- Unparseable files: logged with an error, listed in the console summary, and not cached. The knowledge base is still written for everything else. `init` exits `2` so CI and scripts see the failure. The next run retries these files.
+- Unreadable files: reported the same way as parse failures.
+- Parallel parsing is bounded: at most `4 × workers` tasks are in flight. Parallel and sequential output is byte-identical (tested).
 - Unsupported extension: excluded at scan time
 - Missing tree-sitter grammar: skip with warning
 
@@ -238,10 +291,10 @@ repo-parser bundle [PATH] [OPTIONS]
 Automated with **pytest**. Run the full suite:
 
 ```bash
-pytest --cov=repo_parser --cov-report=term-missing --cov-fail-under=91
+pytest --cov=repo_parser --cov-report=term-missing --cov-fail-under=80
 ```
 
-Current coverage: **91 %** across `repo_parser/` (342 tests).
+CI enforces a coverage floor of 80 % (`--cov-fail-under=80`). This document does not state a measured figure. Measure it with the command above.
 
 ### Test layout
 
@@ -267,7 +320,7 @@ pytest --snapshot-update
 | `test_base_queries.py` | Tree-sitter node helpers, `strip_docstring_quotes`, signature builders |
 | `test_sql_queries.py` | PL/SQL detection heuristics, fallback extraction, tree-sitter SQL parser path |
 | `test_java_queries.py` | Regex-fallback Java parser + tree-sitter `parse_java` |
-| `test_cache_extended.py` | Full `IndexCache` lifecycle and `ParsedFile` serialisation roundtrip |
+| `test_cache_extended.py` | Parse cache reuse rules, atomic save, malformed-entry handling and `ParsedFile` serialisation roundtrip |
 | `test_engine.py` | `ParserEngine` — all language branches, grammar routing, dependency inference |
 | `test_detector.py` | Maven POM, Gradle, Spring prioritisation, `_dedupe_prioritize_spring` |
 | `test_endpoints_security.py` | Property-based secret-redaction tests (hypothesis) |
